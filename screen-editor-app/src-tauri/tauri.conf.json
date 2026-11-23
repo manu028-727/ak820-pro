@@ -1,0 +1,24 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "AK820 Screen Editor",
+  "version": "0.1.0",
+  "identifier": "io.github.manu028-727.ak820-screen-editor",
+  "build": { "frontendDist": "../dist" },
+  "app": {
+    "windows": [],
+    "security": { "csp": null }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["deb", "appimage"],
+    "category": "Utility",
+    "shortDescription": "Lay out the AK820 Pro's screen",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.png"],
+    "resources": {
+      "../../hostagent/ak820layout.py": "py/ak820layout.py",
+      "../../hostagent/ak820layout_editor.py": "py/ak820layout_editor.py",
+      "../../assets-src/current/flash_assets.bin": "py/flash_assets.bin"
+    },
+    "linux": { "deb": { "depends": ["python3"] } }
+  }
+}

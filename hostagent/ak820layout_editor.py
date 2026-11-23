@@ -15,7 +15,11 @@ import base64, http.server, json, os, re, socketserver, threading, urllib.parse,
 import ak820layout as L
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BLOB = os.path.join(ROOT, "assets-src", "current", "flash_assets.bin")
+# In a checkout the blob is in assets-src/; the desktop app carries a copy
+# beside this file.
+BLOB = next((p for p in (os.path.join(os.path.dirname(os.path.abspath(__file__)), "flash_assets.bin"),
+                         os.path.join(ROOT, "assets-src", "current", "flash_assets.bin")) if os.path.isfile(p)),
+            os.path.join(ROOT, "assets-src", "current", "flash_assets.bin"))
 SAFE = re.compile(r"^[A-Za-z0-9._ -]{1,80}$")
 
 
