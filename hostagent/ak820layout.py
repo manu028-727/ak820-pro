@@ -39,11 +39,11 @@ the screen and nothing overlaps (the lock row may share its blank last row
 with the battery row's blank first). The four bands -- song text, clock, lock
 row, battery row -- also take a width "w"; a narrower band draws smaller (the
 clock steps down a face, the lock row goes compact, text is cut). Minimum
-widths: text 48, clock 72, lock row 86, battery row 52.
+widths: text 32, clock 72, lock row 40, battery row 52.
 
-An element left out keeps its default place. "os", "conn", "lock" and
-"status" can be hidden; the text band and the clock cannot (the text band
-shows every message, and the wake waits on the clock). Image paths are
+An element left out keeps its default place. Any element can be hidden
+("hidden": true); a hidden song text takes the keyboard's messages with it
+(connection words, alerts, readouts), since they show in that band. Image paths are
 relative to the JSON file. Transparent pixels become black, the panel's
 background.
 
@@ -68,11 +68,11 @@ DEFAULT = {"os": {"x": 0, "y": 0}, "conn": {"x": 29, "y": 0},
            "lock": {"x": 0, "y": 83, "w": 128}, "status": {"x": 0, "y": 105, "w": 128}}
 BANDS = ("text", "clock", "lock", "status")
 BAND_H = {"text": 31, "clock": 23, "lock": 23, "status": 23}           # display_layout.h's DL_*_H
-MIN_W = {"text": 48, "clock": 72, "lock": 86, "status": 52}            # ...and DL_*_MIN_W
+MIN_W = {"text": 32, "clock": 72, "lock": 40, "status": 52}            # ...and DL_*_MIN_W
 NAMES = {"os": "the OS logo", "conn": "the connection icons", "text": "the song text",
          "clock": "the clock", "lock": "the lock row", "status": "the battery row"}
 KIND = {"os": 1, "conn": 2, "text": 3, "clock": 4, "lock": 5, "status": 6, "image": 16, "label": 17}
-HIDEABLE = ("os", "conn", "lock", "status")
+HIDEABLE = ("os", "conn", "text", "clock", "lock", "status")
 CUSTOM_MAX, RECORDS_MAX, META_MAX = 8, 16, 4096
 SLOTS = (0xE00000, 0xF00000)
 SLOT_SIZE = 0x100000

@@ -176,6 +176,7 @@ label.small{color:var(--muted);font-size:12px}
 #status{padding:8px 10px;border-radius:7px;font-size:13px}#status.ok{color:var(--ok)}#status.bad{color:var(--bad)}
 #log{white-space:pre-wrap;font:12px ui-monospace,monospace;color:var(--muted);max-height:140px;overflow:auto}
 ul#items{list-style:none;padding:0;margin:0}ul#items li{display:flex;justify-content:space-between;align-items:center;padding:5px 8px;border-radius:6px;cursor:pointer}
+ul#items li.hid{color:var(--muted)}ul#items li .tog{padding:2px 8px;font-size:12px}
 ul#items li.sel{background:color-mix(in srgb,var(--accent) 18%,transparent)}
 .num{width:64px}
 </style></head><body>
@@ -202,10 +203,10 @@ ul#items li.sel{background:color-mix(in srgb,var(--accent) 18%,transparent)}
 const Z=4, cv=document.getElementById('cv'), ctx=cv.getContext('2d');
 let assets=null, layout=null, sel=null, images={}, checkTimer=null;
 const FONT={small:{id:1,adv:6,h:14},large:{id:2,adv:10,h:23}};
-const BUILTIN=['os','conn','text','clock','lock','status'], HIDEABLE=['os','conn','lock','status'];
+const BUILTIN=['os','conn','text','clock','lock','status'], HIDEABLE=BUILTIN;
 const NAMES={os:'OS logo',conn:'Connection icons',text:'Song text',clock:'Clock',lock:'Lock row',status:'Battery row'};
 const SIZE={os:[24,24],conn:[93,24],text:[128,31],clock:[128,23],lock:[128,23],status:[128,23]};
-const BANDS=['text','clock','lock','status'], MINW={text:48,clock:72,lock:86,status:52};
+const BANDS=['text','clock','lock','status'], MINW={text:32,clock:72,lock:40,status:52};
 let problems=[], bad=new Set();
 
 async function loadAssets(){
@@ -234,14 +235,14 @@ function draw(){
   if(!hidden('os'))asset(img,assets.idx[12]?12:11,E.os.x,E.os.y);
   if(!hidden('conn'))asset(img,9,E.conn.x,E.conn.y);
   // the song text: the play icon at x, the lines at x+14 and x+2, cut at the band's edge (display.c)
-  {const t=E.text,r=t.x+t.w;for(let j=0;j<9;j++)for(let i=0;i<=Math.min(j,8-j);i++)rect(img,t.x+3+i,t.y+2+j,1,1,white);
+  if(!hidden('text')){const t=E.text,r=t.x+t.w;for(let j=0;j<9;j++)for(let i=0;i<=Math.min(j,8-j);i++)rect(img,t.x+3+i,t.y+2+j,1,1,white);
    text(img,1,'Song title here',t.x+14,t.y,r);text(img,1,'Artist name',t.x+2,t.y+15,r)}
   // the clock: its own face, or the 20px one, or the small one 4 rows down, by width
-  {const c=E.clock,s='12:34:56';let id=3,adv=15,y=c.y;if(8*15>c.w){if(8*10<=c.w){id=2;adv=10}else{id=1;adv=6;y=c.y+4}}
+  if(!hidden('clock')){const c=E.clock,s='12:34:56';let id=3,adv=15,y=c.y;if(8*15>c.w){if(8*10<=c.w){id=2;adv=10}else{id=1;adv=6;y=c.y+4}}
    const w=s.length*adv;text(img,id,s,c.x+Math.max(0,(c.w-w)>>1),y,c.x+c.w)}
-  if(!hidden('lock')){const l=E.lock,cp=l.w<126,px=l.x+(cp?2:4),y=l.y+3;
+  if(!hidden('lock')){const l=E.lock,cp=l.w<126,mini=l.w<86,px=l.x+(mini?1:cp?2:4),y=l.y+3;
     rect(img,px+4,y,5,1,[255,224,0]);rect(img,px+3,y+1,7,1,[255,224,0]);rect(img,px+2,y+2,2,6,[255,224,0]);rect(img,px+9,y+2,2,6,[255,224,0]);rect(img,px,y+7,13,9,[255,224,0]);
-    if(cp)text(img,1,'CAPS',l.x+18,l.y+4);else text(img,2,'CAPS',l.x+20,l.y)}
+    if(mini)text(img,1,'C',l.x+17,l.y+4);else if(cp)text(img,1,'CAPS',l.x+18,l.y+4);else text(img,2,'CAPS',l.x+20,l.y)}
   if(!hidden('status')){const st=E.status,x=st.x+5,y=st.y+5;rect(img,x,y,24,1,white);rect(img,x,y+11,24,1,white);rect(img,x,y,1,12,white);rect(img,x+23,y,1,12,white);rect(img,x+24,y+4,2,4,white);rect(img,x+2,y+2,17,8,[80,200,90]);
     const right=st.x+st.w-4,room=right-(st.x+48),txt=room>=60?'85% 6h':room>=30?'85%':'';if(txt)text(img,2,txt,right-txt.length*10,st.y)}
   layout.widgets.forEach(w=>{ if(w.type==='label')text(img,FONT[w.font||'small'].id,w.text,w.x,w.y);
@@ -258,8 +259,10 @@ function overlay(){const o=ov.getContext('2d');o.clearRect(0,0,512,512);
     o.strokeStyle=b?'#ff4040':s?'#6a9cff':(typeof it==='string'?'rgba(255,200,80,.5)':'rgba(120,220,140,.6)');o.lineWidth=(s||b)?2:1;o.strokeRect(x*Z+1,y*Z+1,w*Z-2,h*Z-2);
     if(s&&typeof it==='string'&&BANDS.includes(it)){o.fillStyle='#6a9cff';o.fillRect((x+w)*Z-5,(y+h/2)*Z-8,4,16)}}}
 function itemsList(){const ul=document.getElementById('items');ul.innerHTML='';
-  const add=(it,label,extra)=>{const li=document.createElement('li');li.textContent=label;if(extra)li.append(extra);if(it===sel)li.className='sel';li.onclick=()=>{sel=it;refresh()};ul.append(li)};
-  BUILTIN.forEach(k=>add(k,NAMES[k]+(hidden(k)?' (hidden)':'')));
+  const add=(it,label,extra)=>{const li=document.createElement('li');const sp=document.createElement('span');sp.textContent=label;li.append(sp);if(extra)li.append(extra);if(it===sel)li.className='sel';else if(typeof it==='string'&&hidden(it))li.className='hid';li.onclick=()=>{sel=it;refresh()};ul.append(li)};
+  BUILTIN.forEach(k=>{const b=document.createElement('button');b.className='tog';b.textContent=hidden(k)?'Show':'Hide';
+    b.title=hidden(k)?'Put it back on the screen':'Take it off the screen (it stays in this list)';
+    b.onclick=ev=>{ev.stopPropagation();el(k).hidden=!hidden(k);if(hidden(k)&&sel===k)sel=null;changed()};add(k,NAMES[k]+(hidden(k)?' (hidden)':''),b)});
   layout.widgets.forEach((w,i)=>add(i,(w.type==='label'?'Label: "'+w.text+'"':'Image: '+w.src)));}
 function props(){const p=document.getElementById('props');p.innerHTML='';if(sel===null){p.innerHTML='<span class="small">Select something to edit it.</span>';return}
   const num=(lab,obj,key,max)=>{const l=document.createElement('label');l.className='small';l.textContent=lab+' ';const i=document.createElement('input');i.type='number';i.className='num';i.min=0;i.max=max;i.value=obj[key]??0;i.oninput=()=>{obj[key]=parseInt(i.value)||0;changed()};l.append(i);return l};
@@ -267,7 +270,8 @@ function props(){const p=document.getElementById('props');p.innerHTML='';if(sel=
   if(typeof sel==='string'){const e=el(sel);p.innerHTML='<b>'+NAMES[sel]+'</b>';
     row.append(num('x',e,'x',127),num('y',e,'y',127));if(BANDS.includes(sel))row.append(num('width',e,'w',128));
     if(HIDEABLE.includes(sel)){const l=document.createElement('label');const c=document.createElement('input');c.type='checkbox';c.checked=!!e.hidden;c.onchange=()=>{e.hidden=c.checked;changed()};l.append(c,' hidden');row.append(l)}
-    p.append(row);if(BANDS.includes(sel))p.insertAdjacentHTML('beforeend',`<div class="small">Drag the blue handle on its right edge to change the width (at least ${MINW[sel]} px). Narrower, it draws smaller: ${{text:'the song lines are cut',clock:'the clock steps down to a smaller font',lock:'compact labels below 126 px',status:'the battery text is shortened, then left out'}[sel]}.</div>`)}
+    if(sel==='text')p.insertAdjacentHTML('beforeend','<div class="small">Hiding it also hides the keyboard\'s messages (connection, alerts, brightness), which show here.</div>');
+    p.append(row);if(BANDS.includes(sel))p.insertAdjacentHTML('beforeend',`<div class="small">Drag the blue handle on its right edge to change the width (at least ${MINW[sel]} px). Narrower, it draws smaller: ${{text:'the song steps down to the small font, then its lines are cut',clock:'the clock steps down to a smaller font',lock:'compact labels below 126 px, single letters (C W F) below 86',status:'the battery text is shortened, then left out'}[sel]}.</div>`)}
   else{const w=layout.widgets[sel];p.innerHTML='<b>'+(w.type==='label'?'Label':'Image')+'</b>';row.append(num('x',w,'x',127),num('y',w,'y',127));
     if(w.type==='label'){const t=document.createElement('input');t.value=w.text;t.maxLength=21;t.oninput=()=>{w.text=t.value.replace(/[^\x20-\x7e]/g,'');changed()};
       const f=document.createElement('select');f.innerHTML='<option value="small">small (6x14)</option><option value="large">large (10x23)</option>';f.value=w.font||'small';f.onchange=()=>{w.font=f.value;changed()};row.append(t,f)}
