@@ -10,7 +10,7 @@ rules the firmware applies -- and Upload writes it to the keyboard.
 Nothing to install: any browser, and the Python the agent already uses.
 Layouts and images are read from and saved to one folder (--dir).
 """
-import http.server, json, os, re, socketserver, threading, webbrowser
+import base64, http.server, json, os, re, socketserver, threading, urllib.parse, webbrowser
 
 import ak820layout as L
 
@@ -75,12 +75,32 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if path == "/api/files":
                 names = sorted(os.listdir(self.workdir))
                 return self._send(200, {"layouts": [n for n in names if n.endswith(".json")],
-                                        "images": [n for n in names if n.lower().endswith(".png")],
+                                        "images": [n for n in names if n.lower().endswith((".png", ".gif"))],
                                         "dir": self.workdir})
             if path.startswith("/file/"):
-                name = _safe(path[6:].replace("%20", " "), (".png", ".json"))
+                name = _safe(path[6:].replace("%20", " "), (".png", ".gif", ".json"))
                 data = open(os.path.join(self.workdir, name), "rb").read()
-                return self._send(200, data, "image/png" if name.lower().endswith(".png") else "application/json")
+                ctype = {"png": "image/png", "gif": "image/gif"}.get(name.lower().rsplit(".", 1)[-1], "application/json")
+                return self._send(200, data, ctype)
+            if path == "/api/frames":
+                # The picture as the keyboard will show it: every frame over
+                # black, in the panel's 16-bit colours, RGB bytes base64'd.
+                q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                name = _safe((q.get("src") or [""])[0], (".png", ".gif"))
+                full = os.path.join(self.workdir, name)
+                if name.lower().endswith(".gif"):
+                    w, h, frames = L.decode_gif(full)
+                else:
+                    w, h, px = L.decode_png(full)
+                    frames = [(0, px)]
+                def rgb(px):
+                    out = bytearray()
+                    for r, g, b, a in px:
+                        r, g, b = r * a // 255, g * a // 255, b * a // 255
+                        out += bytes((r & 0xF8, g & 0xFC, b & 0xF8))
+                    return base64.b64encode(bytes(out)).decode()
+                return self._send(200, {"w": w, "h": h, "delays": [d if d >= 2 else 10 for d, _ in frames],
+                                        "frames": [rgb(f) for _, f in frames]})
             if path == "/api/default":
                 return self._send(200, L.default_doc())
             self._send(404, {"error": "not found"})
@@ -93,13 +113,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         try:
             if path == "/api/image":
-                name = _safe(self.headers.get("X-Name"), (".png",))
+                name = _safe(self.headers.get("X-Name"), (".png", ".gif"))
                 n = int(self.headers.get("Content-Length") or 0)
                 data = self.rfile.read(n)
                 tmp = os.path.join(self.workdir, name)
                 open(tmp, "wb").write(data)
                 try:
-                    w, h, _ = L.decode_png(tmp)
+                    if name.lower().endswith(".gif"):
+                        w, h, frames = L.decode_gif(tmp)
+                        if len(frames) > L.FRAMES_MAX:
+                            raise L.LayoutError(f"{len(frames)} frames: the keyboard plays at most {L.FRAMES_MAX}")
+                    else:
+                        w, h, _ = L.decode_png(tmp)
+                    if w > 128 or h > 128:
+                        raise L.LayoutError(f"{w}x{h} is bigger than the screen (128x128): resize it first")
                 except L.LayoutError:
                     os.remove(tmp)
                     raise
@@ -196,7 +223,7 @@ ul#items li.sel{background:color-mix(in srgb,var(--accent) 18%,transparent)}
 <div class="card"><b>Elements and widgets</b> <span class="small">click to select, drag anywhere, arrow keys nudge (Shift+arrows change a band's width)</span>
 <ul id="items"></ul>
 <div class="row"><button id="addlabel">Add label</button>
-<label class="small">Add image <input type="file" id="addimg" accept="image/png"></label></div></div>
+<label class="small">Add image or GIF <input type="file" id="addimg" accept="image/png,image/gif"></label></div></div>
 <div class="card" id="props"></div>
 </div></main>
 <script>
@@ -217,7 +244,7 @@ async function loadAssets(){
 }
 function px565(v){return [((v>>11)&31)*255/31|0,((v>>5)&63)*255/63|0,(v&31)*255/31|0]}
 function blitRaw(img,ox,oy,src,w,h){const b=assets.b;for(let y=0;y<h;y++)for(let x=0;x<w;x++){
-  const X=ox+x,Y=oy+y;if(X<0||Y<0||X>127||Y>127)continue;const o=src+2*(y*w+x),c=px565(b[o]<<8|b[o+1]),q=4*(Y*128+X);
+  const X=ox+x,Y=oy+y;if(X<0||Y<0||X>127||Y>127)continue;const o=src+2*(y*w+x),c=px565(b[o+1]<<8|b[o]),q=4*(Y*128+X);
   img.data[q]=c[0];img.data[q+1]=c[1];img.data[q+2]=c[2];img.data[q+3]=255}}
 function asset(img,id,x,y){const a=assets.idx[id];if(a)blitRaw(img,x,y,a.off,a.w,a.h)}
 function glyph(img,id,ch,x,y){const a=assets.idx[id];if(!a)return;const c=ch.charCodeAt(0);if(c<a.first||c>=a.first+a.count)return;
@@ -228,7 +255,7 @@ function el(k){return layout.elements[k]}
 function hidden(k){return !!el(k).hidden}
 function bbox(item){ if(typeof item==='string'){const e=el(item),[w,h]=SIZE[item];return [e.x||0,e.y,BANDS.includes(item)?(e.w||128):w,h]}
   const w=layout.widgets[item]; if(w.type==='label'){const f=FONT[w.font||'small'];return [w.x,w.y,f.adv*w.text.length,f.h]}
-  const im=images[w.src];return [w.x,w.y,im?im.width:16,im?im.height:16]}
+  const im=images[w.src];return [w.x,w.y,im?im.w:16,im?im.h:16]}
 function draw(){
   const img=ctx.createImageData(128,128);for(let i=3;i<img.data.length;i+=4)img.data[i]=255;
   const E=layout.elements, W='#fff', white=[255,255,255];
@@ -246,8 +273,9 @@ function draw(){
   if(!hidden('status')){const st=E.status,x=st.x+5,y=st.y+5;rect(img,x,y,24,1,white);rect(img,x,y+11,24,1,white);rect(img,x,y,1,12,white);rect(img,x+23,y,1,12,white);rect(img,x+24,y+4,2,4,white);rect(img,x+2,y+2,17,8,[80,200,90]);
     const right=st.x+st.w-4,room=right-(st.x+48),txt=room>=60?'85% 6h':room>=30?'85%':'';if(txt)text(img,2,txt,right-txt.length*10,st.y)}
   layout.widgets.forEach(w=>{ if(w.type==='label')text(img,FONT[w.font||'small'].id,w.text,w.x,w.y);
-    else{const im=images[w.src];if(im){const d=im.data;for(let y=0;y<im.height;y++)for(let x=0;x<im.width;x++){const X=w.x+x,Y=w.y+y;if(X>127||Y>127)continue;const s=4*(y*im.width+x),a=d[s+3]/255,q=4*(Y*128+X);
-      img.data[q]=(d[s]*a)&0xF8;img.data[q+1]=(d[s+1]*a)&0xFC;img.data[q+2]=(d[s+2]*a)&0xF8}}}});
+    else{const im=images[w.src];if(im){let k=0;if(im.frames.length>1){let t=(performance.now()/10)%im.total;while(t>=im.delays[k]){t-=im.delays[k];k++}}
+      const d=im.frames[k];for(let y=0;y<im.h;y++)for(let x=0;x<im.w;x++){const X=w.x+x,Y=w.y+y;if(X>127||Y>127)continue;const s=3*(y*im.w+x),q=4*(Y*128+X);
+      img.data[q]=d[s];img.data[q+1]=d[s+1];img.data[q+2]=d[s+2]}}}});
   ctx.putImageData(img,0,0); overlay();
 }
 const ov=document.createElement('canvas');ov.width=ov.height=512;ov.style.cssText='position:absolute;left:4px;top:4px;width:512px;height:512px;pointer-events:none';document.getElementById('stage').appendChild(ov);
@@ -285,7 +313,10 @@ async function check(){const r=await api('/api/check',{layout});
   if(r.ok)status(true,`Valid. ${r.bytes} bytes, about ${r.seconds} s to upload.`);
   else status(false,problems.length?problems.map(p=>p.why).slice(0,3).join('. ')+(problems.length>3?` (and ${problems.length-3} more)`:'')+'. Fix the red ones to upload.':r.error)}
 function log(t){document.getElementById('log').textContent=t||''}
-async function loadImage(src){return new Promise(res=>{const im=new Image();im.onload=()=>{const c=document.createElement('canvas');c.width=im.width;c.height=im.height;const g=c.getContext('2d');g.drawImage(im,0,0);images[src]=g.getImageData(0,0,im.width,im.height);res()};im.onerror=()=>res();im.src='/file/'+encodeURIComponent(src)+'?'+Date.now()})}
+async function loadImage(src){try{const r=await (await fetch('/api/frames?src='+encodeURIComponent(src))).json();if(r.error)return;
+  const frames=r.frames.map(b=>Uint8Array.from(atob(b),c=>c.charCodeAt(0)));images[src]={w:r.w,h:r.h,frames,delays:r.delays,total:r.delays.reduce((a,b)=>a+b,0)}}catch(e){}}
+// GIFs play in the preview at their own speed
+(function tick(){if(layout&&layout.widgets.some(w=>w.type==='image'&&images[w.src]&&images[w.src].frames.length>1))draw();setTimeout(tick,40)})();
 async function setLayout(doc){layout={elements:Object.assign({},(await (await fetch('/api/default')).json()).elements),widgets:[]};
   for(const k of BUILTIN)layout.elements[k]=Object.assign({},layout.elements[k],(doc.elements||{})[k]||{});
   layout.widgets=(doc.widgets||[]).map(w=>Object.assign({},w));for(const w of layout.widgets)if(w.type==='image')await loadImage(w.src);sel=null;changed()}

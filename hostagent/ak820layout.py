@@ -71,7 +71,8 @@ BAND_H = {"text": 31, "clock": 23, "lock": 23, "status": 23}           # display
 MIN_W = {"text": 32, "clock": 72, "lock": 40, "status": 52}            # ...and DL_*_MIN_W
 NAMES = {"os": "the OS logo", "conn": "the connection icons", "text": "the song text",
          "clock": "the clock", "lock": "the lock row", "status": "the battery row"}
-KIND = {"os": 1, "conn": 2, "text": 3, "clock": 4, "lock": 5, "status": 6, "image": 16, "label": 17}
+KIND = {"os": 1, "conn": 2, "text": 3, "clock": 4, "lock": 5, "status": 6, "image": 16, "label": 17, "anim": 18}
+FRAMES_MAX = 255
 HIDEABLE = ("os", "conn", "text", "clock", "lock", "status")
 CUSTOM_MAX, RECORDS_MAX, META_MAX = 8, 16, 4096
 SLOTS = (0xE00000, 0xF00000)
@@ -173,13 +174,123 @@ def decode_png(path):
 
 
 def rgb565(px):
-    """Over black, big-endian, as mkraw.py packs the board's own assets."""
+    """Over black, LOW byte first: what the DMA from the external flash wants
+    (mkraw.py's emit_flash swaps its big-endian raws the same way; written
+    big-endian, red and blue came out swapped, orange as blue)."""
     out = bytearray()
     for r, g, b, a in px:
         r, g, b = r * a // 255, g * a // 255, b * a // 255
         v = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
-        out += struct.pack(">H", v)
+        out += struct.pack("<H", v)
     return bytes(out)
+
+
+def decode_gif(path):
+    """-> (w, h, [(delay_cs, [(r, g, b, a)])]): every frame composited whole,
+    as a browser shows it (disposal 0-2, transparency, interlace). Stdlib only."""
+    blob = open(path, "rb").read()
+    if blob[:6] not in (b"GIF87a", b"GIF89a"):
+        raise LayoutError(f"{path}: not a GIF")
+    w, h, flags = struct.unpack_from("<HHB", blob, 6)
+    pos = 13
+    gct = None
+    if flags & 0x80:
+        n = 2 << (flags & 7)
+        gct = [tuple(blob[pos + 3 * i:pos + 3 * i + 3]) for i in range(n)]
+        pos += 3 * n
+    canvas = [(0, 0, 0, 0)] * (w * h)
+    frames, delay, trans, disposal = [], 0, None, 0
+    while pos < len(blob):
+        tag = blob[pos]; pos += 1
+        if tag == 0x3B:
+            break
+        if tag == 0x21:
+            label = blob[pos]; pos += 1
+            if label == 0xF9 and blob[pos] >= 4:
+                pf, delay, ti = struct.unpack_from("<BHB", blob, pos + 1)
+                disposal = (pf >> 2) & 7
+                trans = ti if pf & 1 else None
+            while blob[pos]:
+                pos += blob[pos] + 1
+            pos += 1
+            continue
+        if tag != 0x2C:
+            raise LayoutError(f"{path}: a malformed GIF")
+        fx, fy, fw, fh, lf = struct.unpack_from("<HHHHB", blob, pos); pos += 9
+        ct = gct
+        if lf & 0x80:
+            n = 2 << (lf & 7)
+            ct = [tuple(blob[pos + 3 * i:pos + 3 * i + 3]) for i in range(n)]
+            pos += 3 * n
+        if ct is None:
+            raise LayoutError(f"{path}: a GIF frame without a palette")
+        minsize = blob[pos]; pos += 1
+        data = bytearray()
+        while blob[pos]:
+            data += blob[pos + 1:pos + 1 + blob[pos]]
+            pos += blob[pos] + 1
+        pos += 1
+        idx = _lzw(data, minsize, fw * fh)
+        rows = list(range(fh))
+        if lf & 0x40:   # interlaced
+            rows = list(range(0, fh, 8)) + list(range(4, fh, 8)) + list(range(2, fh, 4)) + list(range(1, fh, 2))
+        prev = list(canvas) if disposal == 3 else None
+        for k, ry in enumerate(rows):
+            Y = fy + ry
+            if Y >= h:
+                continue
+            for X in range(fw):
+                i = k * fw + X
+                if i >= len(idx) or fx + X >= w:
+                    continue
+                c = idx[i]
+                if c == trans or c >= len(ct):
+                    continue
+                canvas[Y * w + fx + X] = ct[c] + (255,)
+        frames.append((delay, list(canvas)))
+        if disposal == 2:
+            for ry in range(fh):
+                for X in range(fw):
+                    if fy + ry < h and fx + X < w:
+                        canvas[(fy + ry) * w + fx + X] = (0, 0, 0, 0)
+        elif disposal == 3 and prev is not None:
+            canvas = prev
+        delay, trans, disposal = 0, None, 0
+    if not frames:
+        raise LayoutError(f"{path}: a GIF with no frames")
+    return w, h, frames
+
+
+def _lzw(data, minsize, npix):
+    clear, end = 1 << minsize, (1 << minsize) + 1
+    size, nxt = minsize + 1, end + 1
+    table = [bytes([i]) for i in range(clear)] + [b"", b""]
+    out, prev = bytearray(), None
+    bits = int.from_bytes(data, "little")
+    pos, total = 0, len(data) * 8
+    while pos + size <= total and len(out) < npix:
+        code = (bits >> pos) & ((1 << size) - 1)
+        pos += size
+        if code == clear:
+            size, nxt = minsize + 1, end + 1
+            del table[end + 1:]
+            prev = None
+            continue
+        if code == end:
+            break
+        if prev is None:
+            entry = table[code]
+        elif code < len(table):
+            entry = table[code]
+            table.append(prev + entry[:1])
+        else:
+            entry = prev + prev[:1]
+            table.append(entry)
+        out += entry
+        prev = entry
+        if len(table) == (1 << size) and size < 12:
+            size += 1
+    return list(out[:npix])
 
 
 # --- the rules -------------------------------------------------------------------
@@ -222,10 +333,24 @@ def resolve(doc, base_dir=".", strict=True):
             if not src:
                 raise LayoutError(f"{name}: no src")
             path = src if os.path.isabs(src) else os.path.join(base_dir, src)
-            iw, ih, px = decode_png(path)
-            if iw > 255 or ih > 255:
-                raise LayoutError(f"{name}: {iw}x{ih} is bigger than the panel")
-            widgets.append({"type": "image", "x": x, "y": y, "w": iw, "h": ih, "data": rgb565(px), "src": src})
+            if src.lower().endswith(".gif"):
+                iw, ih, frames = decode_gif(path)
+                if len(frames) > FRAMES_MAX:
+                    raise LayoutError(f"{name}: {len(frames)} frames; the keyboard plays at most {FRAMES_MAX}")
+            else:
+                iw, ih, px = decode_png(path)
+                frames = [(0, px)]
+            if iw > PANEL or ih > PANEL:
+                raise LayoutError(f"{name}: {iw}x{ih} is bigger than the screen (128x128)")
+            if len(frames) == 1:
+                widgets.append({"type": "image", "x": x, "y": y, "w": iw, "h": ih, "data": rgb565(frames[0][1]), "src": src})
+            else:
+                # The delay table (10 ms units, as the GIF's own), padded to even, then the frames.
+                # Under 2 (20 ms) is "as fast as possible", which browsers show at 100 ms: so does the keyboard.
+                delays = bytes(min(255, d if d >= 2 else 10) for d, _ in frames)
+                data = delays + bytes(len(delays) & 1) + b"".join(rgb565(f) for _, f in frames)
+                widgets.append({"type": "anim", "x": x, "y": y, "w": iw, "h": ih, "data": data, "src": src,
+                                "frames": len(frames)})
         elif t == "label":
             text = w.get("text", "")
             font = w.get("font", "small")
@@ -322,7 +447,8 @@ def pack(els, widgets, seq=1):
             recs.append([KIND["label"], 0, w["x"], w["y"], 0, 0, FONTS[w["font"]][0], len(w["text"]), ("s", len(strings))])
             strings += w["text"].encode("ascii")
         else:
-            recs.append([KIND["image"], 0, w["x"], w["y"], w["w"], w["h"], 0, 0, ("b", len(blobs))])
+            kind = KIND["anim"] if w["type"] == "anim" else KIND["image"]
+            recs.append([kind, 0, w["x"], w["y"], w["w"], w["h"], w.get("frames", 0), 0, ("b", len(blobs))])
             blobs.append(w["data"])
     if len(recs) > RECORDS_MAX:
         raise LayoutError("too many records")

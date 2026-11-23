@@ -23,7 +23,7 @@
 # quantum/action_tapping.c+.h) -- all weak-hooked, no-op or additive for other
 # boards.
 # Everything else in the tree is upstream QMK.
-qmk_firmware-ak820pro  https://github.com/manu028-727/qmk_firmware.git  screen-layout  d8d751c817035ee1ca96e729542c4e876b98d222
+qmk_firmware-ak820pro  https://github.com/manu028-727/qmk_firmware.git  screen-layout  3a6c961286bf2734a3ac92d3481e4f8f49457261
 
 # ak820ctl (clock + flash provisioning) and the asset pipeline (mkraw.py,
 # mkanim.py). MUST be this fork's branch, not fpb/main: main has no --bias
