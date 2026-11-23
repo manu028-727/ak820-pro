@@ -23,16 +23,23 @@ The layout file:
       "elements": {
         "os":     {"x": 0,  "y": 0},
         "conn":   {"x": 29, "y": 0},
-        "text":   {"y": 27},
-        "clock":  {"y": 58},
-        "lock":   {"y": 83, "hidden": false},
-        "status": {"y": 105, "hidden": false}
+        "text":   {"x": 0, "y": 27,  "w": 128},
+        "clock":  {"x": 0, "y": 58,  "w": 128},
+        "lock":   {"x": 0, "y": 83,  "w": 128, "hidden": false},
+        "status": {"x": 0, "y": 105, "w": 128, "hidden": false}
       },
       "widgets": [
         {"type": "image", "x": 0, "y": 83, "src": "tux.png"},
         {"type": "label", "x": 30, "y": 90, "text": "hello", "font": "small"}
       ]
     }
+
+Elements go anywhere, in any order: the only rules are that everything is on
+the screen and nothing overlaps (the lock row may share its blank last row
+with the battery row's blank first). The four bands -- song text, clock, lock
+row, battery row -- also take a width "w"; a narrower band draws smaller (the
+clock steps down a face, the lock row goes compact, text is cut). Minimum
+widths: text 48, clock 72, lock row 86, battery row 52.
 
 An element left out keeps its default place. "os", "conn", "lock" and
 "status" can be hidden; the text band and the clock cannot (the text band
@@ -56,8 +63,14 @@ TEXT_H, CLOCK_BAND_H, LOCK_TXT_H, STATUS_H = 31, 23, 23, 23
 TEXT_LINE_H, SONG_LARGE_H, TEXT_FONT_DY = 15, 14, 9
 LOCK_LABEL_INK_END, LOCK_PAD_H, FONT_STATUS_ROW0_BLANK = 18, 16, 1
 FONTS = {"small": (0, 6, 14), "large": (1, 10, 23)}   # name -> (p0, advance, height)
-DEFAULT = {"os": {"x": 0, "y": 0}, "conn": {"x": 29, "y": 0}, "text": {"y": 27},
-           "clock": {"y": 58}, "lock": {"y": 83}, "status": {"y": 105}}
+DEFAULT = {"os": {"x": 0, "y": 0}, "conn": {"x": 29, "y": 0},
+           "text": {"x": 0, "y": 27, "w": 128}, "clock": {"x": 0, "y": 58, "w": 128},
+           "lock": {"x": 0, "y": 83, "w": 128}, "status": {"x": 0, "y": 105, "w": 128}}
+BANDS = ("text", "clock", "lock", "status")
+BAND_H = {"text": 31, "clock": 23, "lock": 23, "status": 23}           # display_layout.h's DL_*_H
+MIN_W = {"text": 48, "clock": 72, "lock": 86, "status": 52}            # ...and DL_*_MIN_W
+NAMES = {"os": "the OS logo", "conn": "the connection icons", "text": "the song text",
+         "clock": "the clock", "lock": "the lock row", "status": "the battery row"}
 KIND = {"os": 1, "conn": 2, "text": 3, "clock": 4, "lock": 5, "status": 6, "image": 16, "label": 17}
 HIDEABLE = ("os", "conn", "lock", "status")
 CUSTOM_MAX, RECORDS_MAX, META_MAX = 8, 16, 4096
@@ -177,7 +190,7 @@ def _int(v, what, lo=0, hi=255):
     return v
 
 
-def resolve(doc, base_dir="."):
+def resolve(doc, base_dir=".", strict=True):
     """The layout file -> (elements, widgets) with every default filled in and
     every image loaded. Raises LayoutError naming the first problem."""
     if not isinstance(doc, dict):
@@ -194,9 +207,9 @@ def resolve(doc, base_dir="."):
                     raise LayoutError(f"{k!r} cannot be hidden")
                 els[k]["hidden"] = bool(val)
             elif key in ("x", "y"):
-                if key == "x" and k not in ("os", "conn") and val != 0:
-                    raise LayoutError(f"{k!r} is a full-width band: only its y moves")
                 els[k][key] = _int(val, f"{k}.{key}", 0, PANEL - 1)
+            elif key == "w" and k in BANDS:
+                els[k]["w"] = _int(val, f"{k}.w", 1, PANEL)
             else:
                 raise LayoutError(f"element {k!r}: unknown field {key!r}")
     widgets = []
@@ -227,7 +240,8 @@ def resolve(doc, base_dir="."):
             raise LayoutError(f"{name}: type must be image or label")
     if len(widgets) > CUSTOM_MAX:
         raise LayoutError(f"{len(widgets)} widgets: the firmware draws at most {CUSTOM_MAX}")
-    check(els, widgets)
+    if strict:
+        check(els, widgets)
     return els, widgets
 
 
@@ -238,53 +252,61 @@ def builtin_rects(els):
         r["os"] = (els["os"]["x"], els["os"]["y"], OS_W, OS_H)
     if not els["conn"].get("hidden"):
         r["conn"] = (els["conn"]["x"], els["conn"]["y"], CONN_W, CONN_ICON_H)
-    r["text"] = (0, els["text"]["y"], PANEL, TEXT_H)
-    r["clock"] = (0, els["clock"]["y"], PANEL, CLOCK_BAND_H)
-    if not els["lock"].get("hidden"):
-        r["lock"] = (0, els["lock"]["y"], PANEL, LOCK_TXT_H)
-    if not els["status"].get("hidden"):
-        r["status"] = (0, els["status"]["y"], PANEL, STATUS_H)
+    for b in BANDS:
+        if not els[b].get("hidden"):
+            e = els[b]
+            r[b] = (e["x"], e["y"], e["w"], BAND_H[b])
     return r
+
+
+def all_rects(els):
+    """Every built-in's rect, hidden or not (the bounds apply to all)."""
+    shown = {k: dict(v, hidden=False) for k, v in els.items()}
+    return builtin_rects(shown)
 
 
 def meets(a, b):
     return a[0] < b[0] + b[2] and b[0] < a[0] + a[2] and a[1] < b[1] + b[3] and b[1] < a[1] + a[3]
 
 
-def check(els, widgets):
-    """display_layout_valid() and place_ok(), rule for rule."""
-    o, c = els["os"], els["conn"]
-    t, k, l, s = els["text"]["y"], els["clock"]["y"], els["lock"]["y"], els["status"]["y"]
-    rules = [
-        (o["x"] + OS_W <= PANEL and o["y"] + OS_H <= PANEL, "the OS logo runs off the panel"),
-        (c["x"] + CONN_W <= PANEL and c["y"] + CONN_ICON_H <= PANEL, "the connection icons run off the panel"),
-        (o["y"] + OS_H <= t and c["y"] + CONN_ICON_H <= t, "the OS logo and the connection icons must sit above the text band"),
-        (not (meets((o["x"], o["y"], OS_W, OS_H), (c["x"], c["y"], CONN_W, CONN_ICON_H))),
-         "the OS logo and the connection icons overlap"),
-        (t + TEXT_LINE_H + SONG_LARGE_H <= PANEL and t + TEXT_FONT_DY + SONG_LARGE_H <= PANEL, "the text band runs off the panel"),
-        (t + TEXT_LINE_H + SONG_LARGE_H < k and t + TEXT_FONT_DY + SONG_LARGE_H < k, "the text band must end above the clock"),
-        (k + CLOCK_BAND_H <= l, "the clock must end above the lock row"),
-        (s >= l and s - l >= 19, "the battery row must sit at least 19 rows below the lock row"),
-        (s + 23 <= PANEL, "the battery row runs off the panel"),
-        (l + LOCK_TXT_H <= s + FONT_STATUS_ROW0_BLANK, "the lock row's text reaches into the battery row"),
-        (l + LOCK_LABEL_INK_END < s and l + 3 + LOCK_PAD_H - 1 <= l + LOCK_LABEL_INK_END, "the lock row's padlock reaches into the battery row"),
-    ]
-    for ok, why in rules:
-        if not ok:
-            raise LayoutError(why)
+def collisions(els, widgets=()):
+    """Every problem with the placement, as (what, why) pairs: what the editor
+    outlines in red. display_layout_valid() and place_ok(), rule for rule."""
+    out = []
+    for k, (x, y, w, h) in all_rects(els).items():
+        if x + w > PANEL or y + h > PANEL:
+            out.append(((k,), f"{NAMES[k]} runs off the screen"))
+    for b in BANDS:
+        if els[b]["w"] < MIN_W[b]:
+            out.append(((b,), f"{NAMES[b]} must be at least {MIN_W[b]} pixels wide"))
     owned = builtin_rects(els)
+    keys = list(owned)
+    for i, a in enumerate(keys):
+        for b in keys[i + 1:]:
+            ra, rb = owned[a], owned[b]
+            # The lock row's last row may sit on the battery row's first: both blank.
+            if a == "lock" and b == "status" and ra[1] + ra[3] - FONT_STATUS_ROW0_BLANK == rb[1]:
+                ra = (ra[0], ra[1], ra[2], ra[3] - FONT_STATUS_ROW0_BLANK)
+            if meets(ra, rb):
+                out.append(((a, b), f"{NAMES[a]} and {NAMES[b]} overlap"))
     for i, w in enumerate(widgets):
         r = (w["x"], w["y"], w["w"], w["h"])
-        name = f"widget {i + 1} ({w['type']})"
         if w["x"] + w["w"] > PANEL or w["y"] + w["h"] > PANEL:
-            raise LayoutError(f"{name} runs off the panel")
+            out.append(((i,), f"widget {i + 1} ({w['type']}) runs off the screen"))
         for k2, br in owned.items():
             if meets(r, br):
-                raise LayoutError(f"{name} overlaps the {k2} element (hide it, or move one of them)")
+                out.append(((i, k2), f"widget {i + 1} ({w['type']}) overlaps {NAMES[k2]}"))
         for j in range(i):
             v = widgets[j]
             if meets(r, (v["x"], v["y"], v["w"], v["h"])):
-                raise LayoutError(f"{name} overlaps widget {j + 1}")
+                out.append(((i, j), f"widget {i + 1} overlaps widget {j + 1}"))
+    return out
+
+
+def check(els, widgets):
+    probs = collisions(els, widgets)
+    if probs:
+        raise LayoutError(probs[0][1])
 
 
 # --- the package (graphics/layout_store.h) --------------------------------------
@@ -294,7 +316,7 @@ def pack(els, widgets, seq=1):
     for name in ("os", "conn", "text", "clock", "lock", "status"):
         e = els[name]
         flags = 1 if e.get("hidden") else 0
-        recs.append([KIND[name], flags, e.get("x", 0), e["y"], 0, 0, 0, 0, 0])
+        recs.append([KIND[name], flags, e.get("x", 0), e["y"], e.get("w", 0), 0, 0, 0, 0])
     for w in widgets:
         if w["type"] == "label":
             recs.append([KIND["label"], 0, w["x"], w["y"], 0, 0, FONTS[w["font"]][0], len(w["text"]), ("s", len(strings))])

@@ -3,8 +3,8 @@
 A local web page, served by Python's own http.server on 127.0.0.1 only, that
 draws the keyboard's 128x128 screen with the board's real art (decoded from
 assets-src/current/flash_assets.bin, the same bytes the board draws from) and
-lets you drag the dashboard's elements, hide four of them, and add images and
-text labels. Every change is checked by ak820layout.py's rules -- the same
+lets you drag the dashboard's elements anywhere, resize the four bands, hide
+four of them, and add images and text labels. Collisions are outlined in red. Every change is checked by ak820layout.py's rules -- the same
 rules the firmware applies -- and Upload writes it to the keyboard.
 
 Nothing to install: any browser, and the Python the agent already uses.
@@ -106,12 +106,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._send(200, {"name": name, "w": w, "h": h})
             doc = self._json()
             if path == "/api/check":
-                els, ws = L.resolve(doc.get("layout"), self.workdir)
+                els, ws = L.resolve(doc.get("layout"), self.workdir, strict=False)
+                probs = [{"items": list(items), "why": why} for items, why in L.collisions(els, ws)]
                 size = len(L.pack(els, ws))
-                return self._send(200, {"ok": True, "bytes": size, "seconds": round(size / 2700 + 1)})
+                return self._send(200, {"ok": not probs, "problems": probs, "error": probs[0]["why"] if probs else None,
+                                        "bytes": size, "seconds": round(size / 2700 + 1)})
             if path == "/api/save":
                 name = _safe(doc.get("name"), (".json",))
-                L.resolve(doc.get("layout"), self.workdir)   # never save what the board would refuse
+                L.resolve(doc.get("layout"), self.workdir, strict=False)   # a draft may still collide: Upload checks
                 with open(os.path.join(self.workdir, name), "w") as f:
                     json.dump(doc["layout"], f, indent=2)
                 return self._send(200, {"ok": True, "name": name})
@@ -190,7 +192,7 @@ ul#items li.sel{background:color-mix(in srgb,var(--accent) 18%,transparent)}
 <label><input type="checkbox" id="boxes" checked> outlines</label><span class="small" id="cursor"></span></div></div>
 <div class="side">
 <div class="card"><div id="status">Loading…</div><div id="log"></div></div>
-<div class="card"><b>Elements and widgets</b> <span class="small">click to select, drag on the screen, arrow keys nudge</span>
+<div class="card"><b>Elements and widgets</b> <span class="small">click to select, drag anywhere, arrow keys nudge (Shift+arrows change a band's width)</span>
 <ul id="items"></ul>
 <div class="row"><button id="addlabel">Add label</button>
 <label class="small">Add image <input type="file" id="addimg" accept="image/png"></label></div></div>
@@ -203,6 +205,8 @@ const FONT={small:{id:1,adv:6,h:14},large:{id:2,adv:10,h:23}};
 const BUILTIN=['os','conn','text','clock','lock','status'], HIDEABLE=['os','conn','lock','status'];
 const NAMES={os:'OS logo',conn:'Connection icons',text:'Song text',clock:'Clock',lock:'Lock row',status:'Battery row'};
 const SIZE={os:[24,24],conn:[93,24],text:[128,31],clock:[128,23],lock:[128,23],status:[128,23]};
+const BANDS=['text','clock','lock','status'], MINW={text:48,clock:72,lock:86,status:52};
+let problems=[], bad=new Set();
 
 async function loadAssets(){
   const b=new Uint8Array(await (await fetch('/assets.bin')).arrayBuffer()), dv=new DataView(b.buffer), out={};
@@ -217,25 +221,29 @@ function blitRaw(img,ox,oy,src,w,h){const b=assets.b;for(let y=0;y<h;y++)for(let
 function asset(img,id,x,y){const a=assets.idx[id];if(a)blitRaw(img,x,y,a.off,a.w,a.h)}
 function glyph(img,id,ch,x,y){const a=assets.idx[id];if(!a)return;const c=ch.charCodeAt(0);if(c<a.first||c>=a.first+a.count)return;
   blitRaw(img,x,y,a.off+(c-a.first)*a.cw*a.ch*2,a.cw,a.ch)}
-function text(img,id,s,x,y){const a=assets.idx[id];for(let i=0;i<s.length;i++)glyph(img,id,s[i],x+i*a.cw,y)}
+function text(img,id,s,x,y,right){const a=assets.idx[id];for(let i=0;i<s.length;i++){if(right!==undefined&&x+(i+1)*a.cw>right)break;glyph(img,id,s[i],x+i*a.cw,y)}}
 function rect(img,x,y,w,h,c){for(let j=y;j<y+h;j++)for(let i=x;i<x+w;i++){if(i<0||j<0||i>127||j>127)continue;const q=4*(j*128+i);img.data[q]=c[0];img.data[q+1]=c[1];img.data[q+2]=c[2];img.data[q+3]=255}}
 function el(k){return layout.elements[k]}
 function hidden(k){return !!el(k).hidden}
-function bbox(item){ if(typeof item==='string'){const e=el(item),[w,h]=SIZE[item];return [e.x||0,e.y,w,h]}
+function bbox(item){ if(typeof item==='string'){const e=el(item),[w,h]=SIZE[item];return [e.x||0,e.y,BANDS.includes(item)?(e.w||128):w,h]}
   const w=layout.widgets[item]; if(w.type==='label'){const f=FONT[w.font||'small'];return [w.x,w.y,f.adv*w.text.length,f.h]}
   const im=images[w.src];return [w.x,w.y,im?im.width:16,im?im.height:16]}
 function draw(){
   const img=ctx.createImageData(128,128);for(let i=3;i<img.data.length;i+=4)img.data[i]=255;
-  const E=layout.elements;
+  const E=layout.elements, W='#fff', white=[255,255,255];
   if(!hidden('os'))asset(img,assets.idx[12]?12:11,E.os.x,E.os.y);
   if(!hidden('conn'))asset(img,9,E.conn.x,E.conn.y);
-  rect(img,0,E.text.y,12,12,[0,0,0]);
-  // the play icon: a small triangle
-  for(let j=0;j<9;j++)for(let i=0;i<=Math.min(j,8-j);i++)rect(img,3+i,E.text.y+2+j,1,1,[255,255,255]);
-  text(img,1,'Song title here',14,E.text.y);text(img,1,'Artist name',2,E.text.y+15);
-  text(img,3,'12:34:56',4,E.clock.y);
-  if(!hidden('lock')){rect(img,8,E.lock.y+3,5,2,[255,255,255]);rect(img,6,E.lock.y+5,2,5,[255,255,255]);rect(img,13,E.lock.y+5,2,5,[255,255,255]);rect(img,4,E.lock.y+10,13,9,[255,255,255]);text(img,2,'CAPS',20,E.lock.y)}
-  if(!hidden('status')){const y=E.status.y+5;rect(img,5,y,24,1,[255,255,255]);rect(img,5,y+11,24,1,[255,255,255]);rect(img,5,y,1,12,[255,255,255]);rect(img,28,y,1,12,[255,255,255]);rect(img,29,y+4,2,4,[255,255,255]);rect(img,7,y+2,17,8,[80,200,90]);text(img,2,'85%',52,E.status.y)}
+  // the song text: the play icon at x, the lines at x+14 and x+2, cut at the band's edge (display.c)
+  {const t=E.text,r=t.x+t.w;for(let j=0;j<9;j++)for(let i=0;i<=Math.min(j,8-j);i++)rect(img,t.x+3+i,t.y+2+j,1,1,white);
+   text(img,1,'Song title here',t.x+14,t.y,r);text(img,1,'Artist name',t.x+2,t.y+15,r)}
+  // the clock: its own face, or the 20px one, or the small one 4 rows down, by width
+  {const c=E.clock,s='12:34:56';let id=3,adv=15,y=c.y;if(8*15>c.w){if(8*10<=c.w){id=2;adv=10}else{id=1;adv=6;y=c.y+4}}
+   const w=s.length*adv;text(img,id,s,c.x+Math.max(0,(c.w-w)>>1),y,c.x+c.w)}
+  if(!hidden('lock')){const l=E.lock,cp=l.w<126,px=l.x+(cp?2:4),y=l.y+3;
+    rect(img,px+4,y,5,1,[255,224,0]);rect(img,px+3,y+1,7,1,[255,224,0]);rect(img,px+2,y+2,2,6,[255,224,0]);rect(img,px+9,y+2,2,6,[255,224,0]);rect(img,px,y+7,13,9,[255,224,0]);
+    if(cp)text(img,1,'CAPS',l.x+18,l.y+4);else text(img,2,'CAPS',l.x+20,l.y)}
+  if(!hidden('status')){const st=E.status,x=st.x+5,y=st.y+5;rect(img,x,y,24,1,white);rect(img,x,y+11,24,1,white);rect(img,x,y,1,12,white);rect(img,x+23,y,1,12,white);rect(img,x+24,y+4,2,4,white);rect(img,x+2,y+2,17,8,[80,200,90]);
+    const right=st.x+st.w-4,room=right-(st.x+48),txt=room>=60?'85% 6h':room>=30?'85%':'';if(txt)text(img,2,txt,right-txt.length*10,st.y)}
   layout.widgets.forEach(w=>{ if(w.type==='label')text(img,FONT[w.font||'small'].id,w.text,w.x,w.y);
     else{const im=images[w.src];if(im){const d=im.data;for(let y=0;y<im.height;y++)for(let x=0;x<im.width;x++){const X=w.x+x,Y=w.y+y;if(X>127||Y>127)continue;const s=4*(y*im.width+x),a=d[s+3]/255,q=4*(Y*128+X);
       img.data[q]=(d[s]*a)&0xF8;img.data[q+1]=(d[s+1]*a)&0xFC;img.data[q+2]=(d[s+2]*a)&0xF8}}}});
@@ -245,8 +253,10 @@ const ov=document.createElement('canvas');ov.width=ov.height=512;ov.style.cssTex
 function overlay(){const o=ov.getContext('2d');o.clearRect(0,0,512,512);
   if(document.getElementById('grid').checked){o.strokeStyle='rgba(255,255,255,.06)';o.beginPath();for(let i=0;i<=128;i++){o.moveTo(i*Z+.5,0);o.lineTo(i*Z+.5,512);o.moveTo(0,i*Z+.5);o.lineTo(512,i*Z+.5)}o.stroke()}
   const items=[...BUILTIN.filter(k=>!hidden(k)),...layout.widgets.map((_,i)=>i)];
-  for(const it of items){const [x,y,w,h]=bbox(it),s=it===sel;if(!s&&!document.getElementById('boxes').checked)continue;
-    o.strokeStyle=s?'#6a9cff':(typeof it==='string'?'rgba(255,200,80,.5)':'rgba(120,220,140,.6)');o.lineWidth=s?2:1;o.strokeRect(x*Z+1,y*Z+1,w*Z-2,h*Z-2)}}
+  for(const it of items){const [x,y,w,h]=bbox(it),s=it===sel,b=bad.has(it);if(!s&&!b&&!document.getElementById('boxes').checked)continue;
+    if(b){o.fillStyle='rgba(255,60,60,.18)';o.fillRect(x*Z,y*Z,w*Z,h*Z)}
+    o.strokeStyle=b?'#ff4040':s?'#6a9cff':(typeof it==='string'?'rgba(255,200,80,.5)':'rgba(120,220,140,.6)');o.lineWidth=(s||b)?2:1;o.strokeRect(x*Z+1,y*Z+1,w*Z-2,h*Z-2);
+    if(s&&typeof it==='string'&&BANDS.includes(it)){o.fillStyle='#6a9cff';o.fillRect((x+w)*Z-5,(y+h/2)*Z-8,4,16)}}}
 function itemsList(){const ul=document.getElementById('items');ul.innerHTML='';
   const add=(it,label,extra)=>{const li=document.createElement('li');li.textContent=label;if(extra)li.append(extra);if(it===sel)li.className='sel';li.onclick=()=>{sel=it;refresh()};ul.append(li)};
   BUILTIN.forEach(k=>add(k,NAMES[k]+(hidden(k)?' (hidden)':'')));
@@ -255,9 +265,9 @@ function props(){const p=document.getElementById('props');p.innerHTML='';if(sel=
   const num=(lab,obj,key,max)=>{const l=document.createElement('label');l.className='small';l.textContent=lab+' ';const i=document.createElement('input');i.type='number';i.className='num';i.min=0;i.max=max;i.value=obj[key]??0;i.oninput=()=>{obj[key]=parseInt(i.value)||0;changed()};l.append(i);return l};
   const row=document.createElement('div');row.className='row';
   if(typeof sel==='string'){const e=el(sel);p.innerHTML='<b>'+NAMES[sel]+'</b>';
-    if(sel==='os'||sel==='conn')row.append(num('x',e,'x',127));row.append(num('y',e,'y',127));
+    row.append(num('x',e,'x',127),num('y',e,'y',127));if(BANDS.includes(sel))row.append(num('width',e,'w',128));
     if(HIDEABLE.includes(sel)){const l=document.createElement('label');const c=document.createElement('input');c.type='checkbox';c.checked=!!e.hidden;c.onchange=()=>{e.hidden=c.checked;changed()};l.append(c,' hidden');row.append(l)}
-    p.append(row);if(!(sel==='os'||sel==='conn'))p.insertAdjacentHTML('beforeend','<div class="small">A full-width band: it moves up and down only.</div>')}
+    p.append(row);if(BANDS.includes(sel))p.insertAdjacentHTML('beforeend',`<div class="small">Drag the blue handle on its right edge to change the width (at least ${MINW[sel]} px). Narrower, it draws smaller: ${{text:'the song lines are cut',clock:'the clock steps down to a smaller font',lock:'compact labels below 126 px',status:'the battery text is shortened, then left out'}[sel]}.</div>`)}
   else{const w=layout.widgets[sel];p.innerHTML='<b>'+(w.type==='label'?'Label':'Image')+'</b>';row.append(num('x',w,'x',127),num('y',w,'y',127));
     if(w.type==='label'){const t=document.createElement('input');t.value=w.text;t.maxLength=21;t.oninput=()=>{w.text=t.value.replace(/[^\x20-\x7e]/g,'');changed()};
       const f=document.createElement('select');f.innerHTML='<option value="small">small (6x14)</option><option value="large">large (10x23)</option>';f.value=w.font||'small';f.onchange=()=>{w.font=f.value;changed()};row.append(t,f)}
@@ -267,7 +277,9 @@ function changed(){refresh();clearTimeout(checkTimer);checkTimer=setTimeout(chec
 async function api(path,body){const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-AK820':'1'},body:JSON.stringify(body||{})});return r.json()}
 function status(ok,msg){const s=document.getElementById('status');s.className=ok?'ok':'bad';s.textContent=msg;document.getElementById('upload').disabled=!ok}
 async function check(){const r=await api('/api/check',{layout});
-  if(r.ok)status(true,`Valid. ${r.bytes} bytes, about ${r.seconds} s to upload.`);else status(false,r.error)}
+  problems=r.problems||[];bad=new Set(problems.flatMap(p=>p.items));overlay();
+  if(r.ok)status(true,`Valid. ${r.bytes} bytes, about ${r.seconds} s to upload.`);
+  else status(false,problems.length?problems.map(p=>p.why).slice(0,3).join('. ')+(problems.length>3?` (and ${problems.length-3} more)`:'')+'. Fix the red ones to upload.':r.error)}
 function log(t){document.getElementById('log').textContent=t||''}
 async function loadImage(src){return new Promise(res=>{const im=new Image();im.onload=()=>{const c=document.createElement('canvas');c.width=im.width;c.height=im.height;const g=c.getContext('2d');g.drawImage(im,0,0);images[src]=g.getImageData(0,0,im.width,im.height);res()};im.onerror=()=>res();im.src='/file/'+encodeURIComponent(src)+'?'+Date.now()})}
 async function setLayout(doc){layout={elements:Object.assign({},(await (await fetch('/api/default')).json()).elements),widgets:[]};
@@ -278,16 +290,20 @@ async function files(){const r=await (await fetch('/api/files')).json();const s=
 let drag=null;
 cv.onmousedown=e=>{const r=cv.getBoundingClientRect(),x=(e.clientX-r.left)/Z|0,y=(e.clientY-r.top)/Z|0;
   const items=[...layout.widgets.map((_,i)=>i).reverse(),...BUILTIN.filter(k=>!hidden(k))];
+  const fx=(e.clientX-r.left)/Z;
+  if(typeof sel==='string'&&BANDS.includes(sel)){const [bx,by,bw,bh]=bbox(sel);if(Math.abs(fx-(bx+bw))<1.5&&y>=by&&y<by+bh){drag={it:sel,resize:true};return}}
   for(const it of items){const [bx,by,bw,bh]=bbox(it);if(x>=bx&&x<bx+bw&&y>=by&&y<by+bh){sel=it;const o=typeof it==='string'?el(it):layout.widgets[it];drag={it,dx:x-(o.x||0),dy:y-o.y};refresh();return}}
   sel=null;refresh()};
 window.onmousemove=e=>{const r=cv.getBoundingClientRect(),x=Math.floor((e.clientX-r.left)/Z),y=Math.floor((e.clientY-r.top)/Z);
   if(x>=0&&y>=0&&x<128&&y<128)document.getElementById('cursor').textContent=`x ${x}, y ${y}`;
+  if(typeof sel==='string'&&BANDS.includes(sel)&&!drag){const [bx,by,bw,bh]=bbox(sel),fx=(e.clientX-r.left)/Z;cv.style.cursor=(Math.abs(fx-(bx+bw))<1.5&&y>=by&&y<by+bh)?'ew-resize':'default'}
   if(!drag)return;const o=typeof drag.it==='string'?el(drag.it):layout.widgets[drag.it];
-  if(typeof drag.it!=='string'||drag.it==='os'||drag.it==='conn')o.x=Math.max(0,Math.min(127,x-drag.dx));o.y=Math.max(0,Math.min(127,y-drag.dy));changed()};
+  if(drag.resize){o.w=Math.max(1,Math.min(128-o.x,Math.round((e.clientX-r.left)/Z)-o.x));changed();return}
+  const [,,bw,bh]=bbox(drag.it);o.x=Math.max(0,Math.min(128-Math.min(bw,128),x-drag.dx));o.y=Math.max(0,Math.min(128-Math.min(bh,128),y-drag.dy));changed()};
 window.onmouseup=()=>{drag=null};
 window.onkeydown=e=>{if(sel===null||['INPUT','SELECT'].includes(document.activeElement.tagName))return;const o=typeof sel==='string'?el(sel):layout.widgets[sel];
-  const full=typeof sel==='string'&&!(sel==='os'||sel==='conn');const d={ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,-1],ArrowDown:[0,1]}[e.key];
-  if(d){e.preventDefault();if(!full)o.x=Math.max(0,(o.x||0)+d[0]);o.y=Math.max(0,o.y+d[1]);changed()}
+  const d={ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,-1],ArrowDown:[0,1]}[e.key];
+  if(d){e.preventDefault();if(e.shiftKey&&typeof sel==='string'&&BANDS.includes(sel))o.w=Math.max(1,Math.min(128-o.x,o.w+d[0]));else{o.x=Math.max(0,Math.min(127,(o.x||0)+d[0]));o.y=Math.max(0,Math.min(127,o.y+d[1]))}changed()}
   if((e.key==='Delete'||e.key==='Backspace')&&typeof sel==='number'){layout.widgets.splice(sel,1);sel=null;changed()}};
 document.getElementById('grid').onchange=document.getElementById('boxes').onchange=overlay;
 document.getElementById('new').onclick=()=>setLayout({});
