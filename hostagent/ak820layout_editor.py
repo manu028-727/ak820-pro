@@ -88,11 +88,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
                 name = _safe((q.get("src") or [""])[0], (".png", ".gif"))
                 full = os.path.join(self.workdir, name)
-                if name.lower().endswith(".gif"):
-                    w, h, frames = L.decode_gif(full)
-                else:
-                    w, h, px = L.decode_png(full)
-                    frames = [(0, px)]
+                sw, sh, _ = L.picture_info(full)
+                fw, fh = L.fit_size(sw, sh)
+                w = int((q.get("w") or [fw])[0]); h = int((q.get("h") or [fh])[0])
+                if not (1 <= w <= 128 and 1 <= h <= 128):
+                    raise L.LayoutError("a size from 1 to 128")
+                frames = L.load_frames(full, w, h)
                 def rgb(px):
                     out = bytearray()
                     for r, g, b, a in px:
@@ -119,18 +120,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 tmp = os.path.join(self.workdir, name)
                 open(tmp, "wb").write(data)
                 try:
-                    if name.lower().endswith(".gif"):
-                        w, h, frames = L.decode_gif(tmp)
-                        if len(frames) > L.FRAMES_MAX:
-                            raise L.LayoutError(f"{len(frames)} frames: the keyboard plays at most {L.FRAMES_MAX}")
-                    else:
-                        w, h, _ = L.decode_png(tmp)
-                    if w > 128 or h > 128:
-                        raise L.LayoutError(f"{w}x{h} is bigger than the screen (128x128): resize it first")
-                except L.LayoutError:
+                    w, h, n = L.picture_info(tmp)
+                    if n > L.FRAMES_MAX:
+                        raise L.LayoutError(f"{n} frames: the keyboard plays at most {L.FRAMES_MAX}")
+                except Exception as e:
                     os.remove(tmp)
-                    raise
-                return self._send(200, {"name": name, "w": w, "h": h})
+                    raise L.LayoutError(f"{name}: {e}") if not isinstance(e, L.LayoutError) else e
+                fw, fh = L.fit_size(w, h)   # bigger than the screen: shrunk to fit, aspect kept
+                return self._send(200, {"name": name, "w": w, "h": h, "fit_w": fw, "fit_h": fh, "frames": n})
             doc = self._json()
             if path == "/api/check":
                 els, ws = L.resolve(doc.get("layout"), self.workdir, strict=False)
@@ -234,7 +231,7 @@ const BUILTIN=['os','conn','text','clock','lock','status'], HIDEABLE=BUILTIN;
 const NAMES={os:'OS logo',conn:'Connection icons',text:'Song text',clock:'Clock',lock:'Lock row',status:'Battery row'};
 const SIZE={os:[24,24],conn:[93,24],text:[128,31],clock:[128,23],lock:[128,23],status:[128,23]};
 const BANDS=['text','clock','lock','status'], MINW={text:32,clock:72,lock:40,status:52};
-let problems=[], bad=new Set();
+let problems=[], bad=new Set(), keepRatio=true;
 
 async function loadAssets(){
   const b=new Uint8Array(await (await fetch('/assets.bin')).arrayBuffer()), dv=new DataView(b.buffer), out={};
@@ -255,7 +252,7 @@ function el(k){return layout.elements[k]}
 function hidden(k){return !!el(k).hidden}
 function bbox(item){ if(typeof item==='string'){const e=el(item),[w,h]=SIZE[item];return [e.x||0,e.y,BANDS.includes(item)?(e.w||128):w,h]}
   const w=layout.widgets[item]; if(w.type==='label'){const f=FONT[w.font||'small'];return [w.x,w.y,f.adv*w.text.length,f.h]}
-  const im=images[w.src];return [w.x,w.y,im?im.w:16,im?im.h:16]}
+  return [w.x,w.y,w.w||16,w.h||16]}
 function draw(){
   const img=ctx.createImageData(128,128);for(let i=3;i<img.data.length;i+=4)img.data[i]=255;
   const E=layout.elements, W='#fff', white=[255,255,255];
@@ -273,8 +270,9 @@ function draw(){
   if(!hidden('status')){const st=E.status,x=st.x+5,y=st.y+5;rect(img,x,y,24,1,white);rect(img,x,y+11,24,1,white);rect(img,x,y,1,12,white);rect(img,x+23,y,1,12,white);rect(img,x+24,y+4,2,4,white);rect(img,x+2,y+2,17,8,[80,200,90]);
     const right=st.x+st.w-4,room=right-(st.x+48),txt=room>=60?'85% 6h':room>=30?'85%':'';if(txt)text(img,2,txt,right-txt.length*10,st.y)}
   layout.widgets.forEach(w=>{ if(w.type==='label')text(img,FONT[w.font||'small'].id,w.text,w.x,w.y);
-    else{const im=images[w.src];if(im){let k=0;if(im.frames.length>1){let t=(performance.now()/10)%im.total;while(t>=im.delays[k]){t-=im.delays[k];k++}}
-      const d=im.frames[k];for(let y=0;y<im.h;y++)for(let x=0;x<im.w;x++){const X=w.x+x,Y=w.y+y;if(X>127||Y>127)continue;const s=3*(y*im.w+x),q=4*(Y*128+X);
+    else{const exact=images[w.src+'|'+w.w+'x'+w.h],im=exact||images[w.src+'|'];if(!exact)want(w);if(im){let k=0;if(im.frames.length>1){let t=(performance.now()/10)%im.total;while(t>=im.delays[k]){t-=im.delays[k];k++}}
+      // the exact frames the keyboard gets; while resizing, the nearest pixel of the last ones
+      const d=im.frames[k];for(let y=0;y<w.h;y++)for(let x=0;x<w.w;x++){const X=w.x+x,Y=w.y+y;if(X>127||Y>127)continue;const sx=Math.floor(x*im.w/w.w),sy=Math.floor(y*im.h/w.h),s=3*(sy*im.w+sx),q=4*(Y*128+X);
       img.data[q]=d[s];img.data[q+1]=d[s+1];img.data[q+2]=d[s+2]}}}});
   ctx.putImageData(img,0,0); overlay();
 }
@@ -285,7 +283,8 @@ function overlay(){const o=ov.getContext('2d');o.clearRect(0,0,512,512);
   for(const it of items){const [x,y,w,h]=bbox(it),s=it===sel,b=bad.has(it);if(!s&&!b&&!document.getElementById('boxes').checked)continue;
     if(b){o.fillStyle='rgba(255,60,60,.18)';o.fillRect(x*Z,y*Z,w*Z,h*Z)}
     o.strokeStyle=b?'#ff4040':s?'#6a9cff':(typeof it==='string'?'rgba(255,200,80,.5)':'rgba(120,220,140,.6)');o.lineWidth=(s||b)?2:1;o.strokeRect(x*Z+1,y*Z+1,w*Z-2,h*Z-2);
-    if(s&&typeof it==='string'&&BANDS.includes(it)){o.fillStyle='#6a9cff';o.fillRect((x+w)*Z-5,(y+h/2)*Z-8,4,16)}}}
+    if(s&&typeof it==='string'&&BANDS.includes(it)){o.fillStyle='#6a9cff';o.fillRect((x+w)*Z-5,(y+h/2)*Z-8,4,16)}
+    if(s&&typeof it==='number'&&layout.widgets[it].type==='image'){o.fillStyle='#6a9cff';o.fillRect((x+w)*Z-9,(y+h)*Z-9,9,9)}}}
 function itemsList(){const ul=document.getElementById('items');ul.innerHTML='';
   const add=(it,label,extra)=>{const li=document.createElement('li');const sp=document.createElement('span');sp.textContent=label;li.append(sp);if(extra)li.append(extra);if(it===sel)li.className='sel';else if(typeof it==='string'&&hidden(it))li.className='hid';li.onclick=()=>{sel=it;refresh()};ul.append(li)};
   BUILTIN.forEach(k=>{const b=document.createElement('button');b.className='tog';b.textContent=hidden(k)?'Show':'Hide';
@@ -301,6 +300,13 @@ function props(){const p=document.getElementById('props');p.innerHTML='';if(sel=
     if(sel==='text')p.insertAdjacentHTML('beforeend','<div class="small">Hiding it also hides the keyboard\'s messages (connection, alerts, brightness), which show here.</div>');
     p.append(row);if(BANDS.includes(sel))p.insertAdjacentHTML('beforeend',`<div class="small">Drag the blue handle on its right edge to change the width (at least ${MINW[sel]} px). Narrower, it draws smaller: ${{text:'the song steps down to the small font, then its lines are cut',clock:'the clock steps down to a smaller font',lock:'compact labels below 126 px, single letters (C W F) below 86',status:'the battery text is shortened, then left out'}[sel]}.</div>`)}
   else{const w=layout.widgets[sel];p.innerHTML='<b>'+(w.type==='label'?'Label':'Image')+'</b>';row.append(num('x',w,'x',127),num('y',w,'y',127));
+    if(w.type==='image'){const base=images[w.src+'|'],ratio=base?base.w/base.h:1;
+      const wi=num('width',w,'w',128),hi=num('height',w,'h',128),kc=document.createElement('label');kc.className='small';const k=document.createElement('input');k.type='checkbox';k.checked=keepRatio;k.onchange=()=>{keepRatio=k.checked};kc.append(k,' keep ratio');
+      wi.querySelector('input').oninput=e=>{w.w=Math.max(1,Math.min(128,parseInt(e.target.value)||1));if(keepRatio)w.h=Math.max(1,Math.min(128,Math.round(w.w/ratio)));changed()};
+      hi.querySelector('input').oninput=e=>{w.h=Math.max(1,Math.min(128,parseInt(e.target.value)||1));if(keepRatio)w.w=Math.max(1,Math.min(128,Math.round(w.h*ratio)));changed()};
+      const fit=document.createElement('button');fit.textContent='Full screen';fit.title='As big as fits 128x128, aspect kept, centred';
+      fit.onclick=()=>{if(!base)return;const k=Math.min(128/base.w,128/base.h);w.w=Math.max(1,Math.min(128,Math.round(base.w*k)));w.h=Math.max(1,Math.min(128,Math.round(base.h*k)));w.x=(128-w.w)>>1;w.y=(128-w.h)>>1;changed()};
+      row.append(wi,hi,kc,fit)}
     if(w.type==='label'){const t=document.createElement('input');t.value=w.text;t.maxLength=21;t.oninput=()=>{w.text=t.value.replace(/[^\x20-\x7e]/g,'');changed()};
       const f=document.createElement('select');f.innerHTML='<option value="small">small (6x14)</option><option value="large">large (10x23)</option>';f.value=w.font||'small';f.onchange=()=>{w.font=f.value;changed()};row.append(t,f)}
     const d=document.createElement('button');d.textContent='Remove';d.onclick=()=>{layout.widgets.splice(sel,1);sel=null;changed()};row.append(d);p.append(row)}}
@@ -313,13 +319,18 @@ async function check(){const r=await api('/api/check',{layout});
   if(r.ok)status(true,`Valid. ${r.bytes} bytes, about ${r.seconds} s to upload.`);
   else status(false,problems.length?problems.map(p=>p.why).slice(0,3).join('. ')+(problems.length>3?` (and ${problems.length-3} more)`:'')+'. Fix the red ones to upload.':r.error)}
 function log(t){document.getElementById('log').textContent=t||''}
-async function loadImage(src){try{const r=await (await fetch('/api/frames?src='+encodeURIComponent(src))).json();if(r.error)return;
-  const frames=r.frames.map(b=>Uint8Array.from(atob(b),c=>c.charCodeAt(0)));images[src]={w:r.w,h:r.h,frames,delays:r.delays,total:r.delays.reduce((a,b)=>a+b,0)}}catch(e){}}
+async function fetchFrames(src,w,h){const r=await (await fetch('/api/frames?src='+encodeURIComponent(src)+(w?`&w=${w}&h=${h}`:''))).json();if(r.error)return null;
+  const frames=r.frames.map(b=>Uint8Array.from(atob(b),c=>c.charCodeAt(0)));return {w:r.w,h:r.h,frames,delays:r.delays,total:r.delays.reduce((a,b)=>a+b,0)}}
+// images[src+'|'] is the fitted size, the fallback; images[src+'|WxH'] the exact frames at a widget's size
+async function loadImage(src){try{const f=await fetchFrames(src);if(f)images[src+'|']=f}catch(e){}}
+const wanted={};let wantTimer=null;
+function want(w){const k=w.src+'|'+w.w+'x'+w.h;if(wanted[k])return;wanted[k]=1;clearTimeout(wantTimer);
+  wantTimer=setTimeout(async()=>{const f=await fetchFrames(w.src,w.w,w.h).catch(()=>null);if(f){images[k]=f;draw()}delete wanted[k]},drag?400:0)}
 // GIFs play in the preview at their own speed
-(function tick(){if(layout&&layout.widgets.some(w=>w.type==='image'&&images[w.src]&&images[w.src].frames.length>1))draw();setTimeout(tick,40)})();
+(function tick(){if(layout&&layout.widgets.some(w=>w.type==='image'&&images[w.src+'|']&&images[w.src+'|'].frames.length>1))draw();setTimeout(tick,40)})();
 async function setLayout(doc){layout={elements:Object.assign({},(await (await fetch('/api/default')).json()).elements),widgets:[]};
   for(const k of BUILTIN)layout.elements[k]=Object.assign({},layout.elements[k],(doc.elements||{})[k]||{});
-  layout.widgets=(doc.widgets||[]).map(w=>Object.assign({},w));for(const w of layout.widgets)if(w.type==='image')await loadImage(w.src);sel=null;changed()}
+  layout.widgets=(doc.widgets||[]).map(w=>Object.assign({},w));for(const w of layout.widgets)if(w.type==='image'){await loadImage(w.src);const f=images[w.src+'|'];if(f&&!w.w){w.w=f.w;w.h=f.h}}sel=null;changed()}
 async function files(){const r=await (await fetch('/api/files')).json();const s=document.getElementById('layouts');s.length=1;r.layouts.forEach(n=>s.add(new Option(n,n)))}
 // dragging
 let drag=null;
@@ -327,15 +338,20 @@ cv.onmousedown=e=>{const r=cv.getBoundingClientRect(),x=(e.clientX-r.left)/Z|0,y
   const items=[...layout.widgets.map((_,i)=>i).reverse(),...BUILTIN.filter(k=>!hidden(k))];
   const fx=(e.clientX-r.left)/Z;
   if(typeof sel==='string'&&BANDS.includes(sel)){const [bx,by,bw,bh]=bbox(sel);if(Math.abs(fx-(bx+bw))<1.5&&y>=by&&y<by+bh){drag={it:sel,resize:true};return}}
+  const fy=(e.clientY-r.top)/Z;
+  if(typeof sel==='number'&&layout.widgets[sel].type==='image'){const [bx,by,bw,bh]=bbox(sel);if(Math.abs(fx-(bx+bw))<2.5&&Math.abs(fy-(by+bh))<2.5){const b=images[layout.widgets[sel].src+'|'];drag={it:sel,corner:true,ratio:b?b.w/b.h:bw/bh};return}}
   for(const it of items){const [bx,by,bw,bh]=bbox(it);if(x>=bx&&x<bx+bw&&y>=by&&y<by+bh){sel=it;const o=typeof it==='string'?el(it):layout.widgets[it];drag={it,dx:x-(o.x||0),dy:y-o.y};refresh();return}}
   sel=null;refresh()};
 window.onmousemove=e=>{const r=cv.getBoundingClientRect(),x=Math.floor((e.clientX-r.left)/Z),y=Math.floor((e.clientY-r.top)/Z);
   if(x>=0&&y>=0&&x<128&&y<128)document.getElementById('cursor').textContent=`x ${x}, y ${y}`;
   if(typeof sel==='string'&&BANDS.includes(sel)&&!drag){const [bx,by,bw,bh]=bbox(sel),fx=(e.clientX-r.left)/Z;cv.style.cursor=(Math.abs(fx-(bx+bw))<1.5&&y>=by&&y<by+bh)?'ew-resize':'default'}
+  if(typeof sel==='number'&&layout.widgets[sel]&&layout.widgets[sel].type==='image'&&!drag){const [bx,by,bw,bh]=bbox(sel),fx=(e.clientX-r.left)/Z,fy=(e.clientY-r.top)/Z;cv.style.cursor=(Math.abs(fx-(bx+bw))<2.5&&Math.abs(fy-(by+bh))<2.5)?'nwse-resize':'default'}
   if(!drag)return;const o=typeof drag.it==='string'?el(drag.it):layout.widgets[drag.it];
   if(drag.resize){o.w=Math.max(1,Math.min(128-o.x,Math.round((e.clientX-r.left)/Z)-o.x));changed();return}
+  if(drag.corner){let nw=Math.max(1,Math.min(128-o.x,Math.round((e.clientX-r.left)/Z)-o.x)),nh=Math.max(1,Math.min(128-o.y,Math.round((e.clientY-r.top)/Z)-o.y));
+    if(keepRatio&&!e.shiftKey){nh=Math.max(1,Math.round(nw/drag.ratio));if(o.y+nh>128){nh=128-o.y;nw=Math.max(1,Math.round(nh*drag.ratio))}}o.w=nw;o.h=nh;changed();return}
   const [,,bw,bh]=bbox(drag.it);o.x=Math.max(0,Math.min(128-Math.min(bw,128),x-drag.dx));o.y=Math.max(0,Math.min(128-Math.min(bh,128),y-drag.dy));changed()};
-window.onmouseup=()=>{drag=null};
+window.onmouseup=()=>{const was=drag;drag=null;if(was&&was.corner)draw()};
 window.onkeydown=e=>{if(sel===null||['INPUT','SELECT'].includes(document.activeElement.tagName))return;const o=typeof sel==='string'?el(sel):layout.widgets[sel];
   const d={ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,-1],ArrowDown:[0,1]}[e.key];
   if(d){e.preventDefault();if(e.shiftKey&&typeof sel==='string'&&BANDS.includes(sel))o.w=Math.max(1,Math.min(128-o.x,o.w+d[0]));else{o.x=Math.max(0,Math.min(127,(o.x||0)+d[0]));o.y=Math.max(0,Math.min(127,o.y+d[1]))}changed()}
@@ -346,7 +362,8 @@ document.getElementById('layouts').onchange=async e=>{if(!e.target.value)return;
 document.getElementById('addlabel').onclick=()=>{layout.widgets.push({type:'label',x:2,y:90,text:'hello',font:'small'});sel=layout.widgets.length-1;changed()};
 document.getElementById('addimg').onchange=async e=>{const f=e.target.files[0];if(!f)return;const name=f.name.replace(/[^A-Za-z0-9._ -]/g,'_');
   const r=await (await fetch('/api/image',{method:'POST',headers:{'X-Name':name,'X-AK820':'1'},body:f})).json();e.target.value='';
-  if(r.error||r.ok===false){status(false,r.error);return}await loadImage(r.name);layout.widgets.push({type:'image',x:0,y:90,src:r.name});sel=layout.widgets.length-1;changed()};
+  if(r.error||r.ok===false){status(false,r.error);return}await loadImage(r.name);layout.widgets.push({type:'image',x:0,y:0,w:r.fit_w,h:r.fit_h,src:r.name});
+  if(r.fit_w!==r.w||r.fit_h!==r.h)log(`${r.name} is ${r.w}x${r.h}: shrunk to ${r.fit_w}x${r.fit_h} to fit the screen. Drag its corner to resize.`);sel=layout.widgets.length-1;changed()};
 document.getElementById('save').onclick=async()=>{let n=document.getElementById('name').value.trim();if(!n.endsWith('.json'))n+='.json';const r=await api('/api/save',{name:n,layout});
   if(r.ok){log('saved '+r.name);files()}else status(false,r.error)};
 for(const [id,path,busy] of [['upload','/api/upload','Uploading… (the agent is paused meanwhile)'],['info','/api/info','Asking the keyboard…'],['reset','/api/reset','Erasing the layout slots…']])

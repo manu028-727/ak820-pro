@@ -173,6 +173,103 @@ def decode_png(path):
     return w, h, px
 
 
+def fit_size(w, h, box=PANEL):
+    """A picture's size shrunk (never grown) to fit box x box, aspect kept."""
+    if w <= box and h <= box:
+        return w, h
+    k = min(box / w, box / h)
+    return max(1, round(w * k)), max(1, round(h * k))
+
+
+def _pil():
+    try:
+        from PIL import Image  # optional: much faster for big GIFs; the stdlib path is the fallback
+        return Image
+    except ImportError:
+        return None
+
+
+def picture_info(path):
+    """-> (w, h, frames) of a PNG or GIF."""
+    st = os.stat(path)
+    return _decoded(path, st.st_mtime_ns, st.st_size)[:3]
+
+
+_cache = {}
+
+
+def _decoded(path, mtime, size):
+    key = (os.path.abspath(path), mtime, size)
+    if key not in _cache:
+        Image = _pil()
+        if Image is not None:
+            frames = []
+            with Image.open(path) as im:
+                n = getattr(im, "n_frames", 1)
+                for k in range(n):
+                    im.seek(k)
+                    frames.append((im.info.get("duration", 0) // 10, list(_flat(im.convert("RGBA")))))
+                w, h = im.size
+        elif path.lower().endswith(".gif"):
+            w, h, frames = decode_gif(path)
+        else:
+            w, h, px = decode_png(path)
+            frames = [(0, px)]
+        if len(_cache) > 16:
+            _cache.clear()
+        _cache[key] = (w, h, len(frames), frames)
+    return _cache[key]
+
+
+def _flat(im):
+    get = getattr(im, "get_flattened_data", None) or im.getdata
+    return get()
+
+
+def load_frames(path, tw, th):
+    """-> [(delay_cs, [(r, g, b, 255)])]: every frame over black, resampled to
+    tw x th (an area average shrinking, nearest pixel growing, as Pillow's BOX
+    and NEAREST). What the editor previews is this same call."""
+    st = os.stat(path)
+    key = (os.path.abspath(path), st.st_mtime_ns, st.st_size, tw, th)
+    if key in _cache:
+        return _cache[key]
+    sw, sh, _, frames = _decoded(path, st.st_mtime_ns, st.st_size)
+    Image = _pil()
+    out = []
+    for d, px in frames:
+        flat = [(r * a // 255, g * a // 255, b * a // 255) for r, g, b, a in px]
+        if (tw, th) == (sw, sh):
+            res = flat
+        elif Image is not None:
+            im = Image.new("RGB", (sw, sh))
+            im.putdata(flat)
+            im = im.resize((tw, th), Image.BOX if tw <= sw and th <= sh else Image.NEAREST)
+            res = list(_flat(im))
+        else:
+            res = _resample(flat, sw, sh, tw, th)
+        out.append((d, [(r, g, b, 255) for r, g, b in res]))
+    _cache[key] = out
+    return out
+
+
+def _resample(px, sw, sh, tw, th):
+    xs = [(x * sw // tw, max(x * sw // tw + 1, (x + 1) * sw // tw)) for x in range(tw)]
+    ys = [(y * sh // th, max(y * sh // th + 1, (y + 1) * sh // th)) for y in range(th)]
+    out = []
+    for y0, y1 in ys:
+        for x0, x1 in xs:
+            n = (y1 - y0) * (x1 - x0)
+            r = g = b = 0
+            for yy in range(y0, y1):
+                row = yy * sw
+                for xx in range(x0, x1):
+                    p = px[row + xx]
+                    r += p[0]; g += p[1]; b += p[2]
+            out.append(((r + n // 2) // n, (g + n // 2) // n, (b + n // 2) // n))
+    return out
+
+
 def rgb565(px):
     """Over black, LOW byte first: what the DMA from the external flash wants
     (mkraw.py's emit_flash swaps its big-endian raws the same way; written
@@ -333,15 +430,14 @@ def resolve(doc, base_dir=".", strict=True):
             if not src:
                 raise LayoutError(f"{name}: no src")
             path = src if os.path.isabs(src) else os.path.join(base_dir, src)
-            if src.lower().endswith(".gif"):
-                iw, ih, frames = decode_gif(path)
-                if len(frames) > FRAMES_MAX:
-                    raise LayoutError(f"{name}: {len(frames)} frames; the keyboard plays at most {FRAMES_MAX}")
-            else:
-                iw, ih, px = decode_png(path)
-                frames = [(0, px)]
-            if iw > PANEL or ih > PANEL:
-                raise LayoutError(f"{name}: {iw}x{ih} is bigger than the screen (128x128)")
+            sw, sh, nframes = picture_info(path)
+            if nframes > FRAMES_MAX:
+                raise LayoutError(f"{name}: {nframes} frames; the keyboard plays at most {FRAMES_MAX}")
+            # Its size on the screen: "w"/"h" if given, else its own, shrunk to fit 128x128.
+            fw, fh = fit_size(sw, sh)
+            iw = _int(w.get("w", fw), f"{name} w", 1, PANEL)
+            ih = _int(w.get("h", fh), f"{name} h", 1, PANEL)
+            frames = load_frames(path, iw, ih)
             if len(frames) == 1:
                 widgets.append({"type": "image", "x": x, "y": y, "w": iw, "h": ih, "data": rgb565(frames[0][1]), "src": src})
             else:
