@@ -1,0 +1,147 @@
+{
+ "clock": [
+  {
+   "h": 14,
+   "cw": 9,
+   "first": 48,
+   "count": 11,
+   "file": "clock-14.png",
+   "ppem": 18
+  },
+  {
+   "h": 17,
+   "cw": 11,
+   "first": 48,
+   "count": 11,
+   "file": "clock-17.png",
+   "ppem": 22
+  },
+  {
+   "h": 19,
+   "cw": 13,
+   "first": 48,
+   "count": 11,
+   "file": "clock-19.png",
+   "ppem": 26
+  },
+  {
+   "h": 26,
+   "cw": 18,
+   "first": 48,
+   "count": 11,
+   "file": "clock-26.png",
+   "ppem": 36
+  },
+  {
+   "h": 31,
+   "cw": 21,
+   "first": 48,
+   "count": 11,
+   "file": "clock-31.png",
+   "ppem": 42
+  },
+  {
+   "h": 35,
+   "cw": 24,
+   "first": 48,
+   "count": 11,
+   "file": "clock-35.png",
+   "ppem": 48
+  },
+  {
+   "h": 42,
+   "cw": 28,
+   "first": 48,
+   "count": 11,
+   "file": "clock-42.png",
+   "ppem": 56
+  }
+ ],
+ "text": [
+  {
+   "h": 18,
+   "cw": 8,
+   "first": 32,
+   "count": 95,
+   "file": "text-18.png",
+   "ppem": 16,
+   "baseline": 14
+  },
+  {
+   "h": 23,
+   "cw": 10,
+   "first": 32,
+   "count": 95,
+   "file": "text-23.png",
+   "ppem": 20
+  },
+  {
+   "h": 26,
+   "cw": 12,
+   "first": 32,
+   "count": 95,
+   "file": "text-26.png",
+   "ppem": 24,
+   "baseline": 21
+  },
+  {
+   "h": 30,
+   "cw": 14,
+   "first": 32,
+   "count": 95,
+   "file": "text-30.png",
+   "ppem": 28,
+   "baseline": 24
+  }
+ ],
+ "digit": [
+  {
+   "for": 16,
+   "h": 14,
+   "cw": 7,
+   "first": 49,
+   "count": 3,
+   "file": "digit-16.png",
+   "ppem": 13
+  },
+  {
+   "for": 20,
+   "h": 19,
+   "cw": 9,
+   "first": 49,
+   "count": 3,
+   "file": "digit-20.png",
+   "ppem": 17
+  },
+  {
+   "for": 32,
+   "h": 30,
+   "cw": 15,
+   "first": 49,
+   "count": 3,
+   "file": "digit-32.png",
+   "ppem": 29
+  }
+ ],
+ "os": [
+  16,
+  20,
+  32,
+  40,
+  48
+ ],
+ "conn": [
+  {
+   "h": 16,
+   "w": 53
+  },
+  {
+   "h": 20,
+   "w": 66
+  },
+  {
+   "h": 32,
+   "w": 105
+  }
+ ]
+}

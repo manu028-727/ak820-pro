@@ -71,10 +71,11 @@ BAND_H = {"text": 31, "clock": 23, "lock": 23, "status": 23}           # display
 MIN_W = {"text": 32, "clock": 72, "lock": 40, "status": 52}            # ...and DL_*_MIN_W
 NAMES = {"os": "the OS logo", "conn": "the connection icons", "text": "the song text",
          "clock": "the clock", "lock": "the lock row", "status": "the battery row"}
-KIND = {"os": 1, "conn": 2, "text": 3, "clock": 4, "lock": 5, "status": 6, "image": 16, "label": 17, "anim": 18}
+KIND = {"os": 1, "conn": 2, "text": 3, "clock": 4, "lock": 5, "status": 6, "image": 16, "label": 17, "anim": 18,
+        "font": 19, "icon": 20}
 FRAMES_MAX = 255
 HIDEABLE = ("os", "conn", "text", "clock", "lock", "status")
-CUSTOM_MAX, RECORDS_MAX, META_MAX = 8, 16, 4096
+CUSTOM_MAX, RECORDS_MAX, META_MAX = 8, 32, 4096
 SLOTS = (0xE00000, 0xF00000)
 SLOT_SIZE = 0x100000
 MAGIC, VERSION = 0x314C4B41, 1
@@ -96,6 +97,105 @@ ERRORS = {0: "ok", 1: "no layout in either slot", 2: "a malformed header", 3: "a
 
 class LayoutError(Exception):
     pass
+
+
+# --- sizes (Manuel, 11-23: every element resizable) ---------------------------
+# The faces and icons a layout carries at other sizes than the board's own:
+# hostagent/layout-assets/ (made by assets-src/mklayoutassets.py). An element's
+# "size" is a height in pixels; None or the default is the board's own.
+ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "layout-assets")
+DEFAULT_SIZE = {"os": 24, "conn": 24, "text": None, "clock": 22}
+DLI = {"apple": 0, "windows": 1, "linux": 2, "cable": 3, "bt": 4, "24g": 5}   # layout_store.h's DLI_*
+_assets_index = None
+
+
+def assets_index():
+    global _assets_index
+    if _assets_index is None:
+        _assets_index = json.load(open(os.path.join(ASSETS_DIR, "index.json")))
+    return _assets_index
+
+
+def sizes_for(k):
+    """The sizes element k can take, the default among them (None: the menu's face)."""
+    ix = assets_index()
+    if k == "os":
+        return sorted([24] + ix["os"])
+    if k == "conn":
+        return sorted([24] + [c["h"] for c in ix["conn"]])
+    if k == "clock":
+        return sorted([22] + [c["h"] for c in ix["clock"]])
+    if k == "text":
+        return [None] + [c["h"] for c in ix["text"]]
+    return []
+
+
+def _face(kind, h):
+    for e in assets_index()[kind]:
+        if e.get("h") == h or e.get("for") == h:
+            return e
+    raise LayoutError(f"no {kind} face {h} px tall")
+
+
+def face_data(e):
+    """A strip PNG -> the firmware's glyph tiles: each cell row by row, one after another."""
+    w, h, px = decode_png(os.path.join(ASSETS_DIR, e["file"]))
+    cw = e["cw"]
+    out = b""
+    for i in range(e["count"]):
+        out += rgb565([px[y * w + i * cw + x] for y in range(h) for x in range(cw)])
+    return out
+
+
+def icon_data(name):
+    w, h, px = decode_png(os.path.join(ASSETS_DIR, name))
+    return w, h, rgb565(px)
+
+
+def element_size(els, k):
+    """(w, h) of what element k draws at its size, as display_layout_rect() says."""
+    e, s = els[k], els[k].get("size")
+    if k == "os":
+        return (s or 24, s or 24)
+    if k == "conn":
+        if not s or s == 24:
+            return CONN_W, CONN_ICON_H
+        c = next(c for c in assets_index()["conn"] if c["h"] == s)
+        return c["w"] + 1 + _face("digit", s)["cw"] + 1, s
+    if k == "text":
+        return e["w"], (2 * (s + 1) + 1 if s else TEXT_H)
+    if k == "clock":
+        return e["w"], (s + 1 if s and s != 22 else CLOCK_BAND_H)
+    return e["w"], BAND_H[k]
+
+
+def size_records(els):
+    """The fonts and icons the sizes need, and each built-in's p0: ([(rec, data)], {element: p0})."""
+    recs, p0, fonts = [], {}, []
+
+    def font(e):
+        fonts.append(e)
+        recs.append(([KIND["font"], 0, 0, 0, e["cw"], e["h"], e["first"], e["count"]], face_data(e)))
+        return len(fonts)            # its place among the fonts, plus one
+
+    s = els["clock"].get("size")
+    if s and s != 22:
+        p0["clock"] = font(_face("clock", s))
+    s = els["text"].get("size")
+    if s:
+        p0["text"] = font(_face("text", s))
+    s = els["os"].get("size")
+    if s and s != 24:
+        for name in ("apple", "windows", "linux"):
+            w, h, d = icon_data(f"os-{name}-{s}.png")
+            recs.append(([KIND["icon"], 0, 0, 0, w, h, DLI[name], 0], d))
+    s = els["conn"].get("size")
+    if s and s != 24:
+        for name in ("cable", "bt", "24g"):
+            w, h, d = icon_data(f"conn-{name}-{s}.png")
+            recs.append(([KIND["icon"], 0, 0, 0, w, h, DLI[name], 0], d))
+        p0["conn"] = font(_face("digit", s))
+    return recs, p0
 
 
 # --- PNG, stdlib only ----------------------------------------------------------
@@ -418,6 +518,10 @@ def resolve(doc, base_dir=".", strict=True):
                 els[k][key] = _int(val, f"{k}.{key}", 0, PANEL - 1)
             elif key == "w" and k in BANDS:
                 els[k]["w"] = _int(val, f"{k}.w", 1, PANEL)
+            elif key == "size" and k in DEFAULT_SIZE:
+                if val is not None and val not in sizes_for(k):
+                    raise LayoutError(f"{NAMES[k]} comes in {', '.join(str(v) for v in sizes_for(k) if v)} px, not {val!r}")
+                els[k]["size"] = None if val == DEFAULT_SIZE[k] else val
             else:
                 raise LayoutError(f"element {k!r}: unknown field {key!r}")
     widgets = []
@@ -469,14 +573,9 @@ def resolve(doc, base_dir=".", strict=True):
 def builtin_rects(els):
     """What each visible built-in owns, as display_layout_rect() says."""
     r = {}
-    if not els["os"].get("hidden"):
-        r["os"] = (els["os"]["x"], els["os"]["y"], OS_W, OS_H)
-    if not els["conn"].get("hidden"):
-        r["conn"] = (els["conn"]["x"], els["conn"]["y"], CONN_W, CONN_ICON_H)
-    for b in BANDS:
-        if not els[b].get("hidden"):
-            e = els[b]
-            r[b] = (e["x"], e["y"], e["w"], BAND_H[b])
+    for k in ("os", "conn") + BANDS:
+        if not els[k].get("hidden"):
+            r[k] = (els[k]["x"], els[k]["y"]) + element_size(els, k)
     return r
 
 
@@ -534,10 +633,14 @@ def check(els, widgets):
 
 def pack(els, widgets, seq=1):
     recs, strings, blobs = [], b"", []
+    sized, p0 = size_records(els)
     for name in ("os", "conn", "text", "clock", "lock", "status"):
         e = els[name]
         flags = 1 if e.get("hidden") else 0
-        recs.append([KIND[name], flags, e.get("x", 0), e["y"], e.get("w", 0), 0, 0, 0, 0])
+        recs.append([KIND[name], flags, e.get("x", 0), e["y"], e.get("w", 0), 0, p0.get(name, 0), 0, 0])
+    for r, data in sized:
+        recs.append(r + [("b", len(blobs))])
+        blobs.append(data)
     for w in widgets:
         if w["type"] == "label":
             recs.append([KIND["label"], 0, w["x"], w["y"], 0, 0, FONTS[w["font"]][0], len(w["text"]), ("s", len(strings))])

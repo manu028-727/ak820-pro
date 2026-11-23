@@ -106,6 +106,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return base64.b64encode(bytes(out)).decode()
                 return self._send(200, {"w": w, "h": h, "delays": [d if d >= 2 else 10 for d, _ in frames],
                                         "frames": [rgb(f) for _, f in frames]})
+            if path == "/api/sizes":
+                # What each element can be resized to, and the faces and icons behind them.
+                return self._send(200, {"index": L.assets_index(),
+                                        "sizes": {k: L.sizes_for(k) for k in L.DEFAULT_SIZE}})
+            if path.startswith("/layout-asset/"):
+                name = urllib.parse.unquote(path[len("/layout-asset/"):])
+                if not SAFE.match(name) or not name.endswith(".png"):
+                    return self._send(404, {"error": "not found"})
+                full = os.path.join(L.ASSETS_DIR, name)
+                if not os.path.isfile(full):
+                    return self._send(404, {"error": "not found"})
+                return self._send(200, open(full, "rb").read(), "image/png")
             if path == "/api/default":
                 return self._send(200, L.default_doc())
             self._send(404, {"error": "not found"})
@@ -236,6 +248,33 @@ const NAMES={os:'OS logo',conn:'Connection icons',text:'Song text',clock:'Clock'
 const SIZE={os:[24,24],conn:[93,24],text:[128,31],clock:[128,23],lock:[128,23],status:[128,23]};
 const BANDS=['text','clock','lock','status'], MINW={text:32,clock:72,lock:40,status:52};
 let problems=[], bad=new Set(), keepRatio=true;
+// Sizes (every element resizable): what each can be, and the faces and icons behind them.
+let SIZES=null, LA={};
+const SIZED=['os','conn','text','clock'], DEFSIZE={os:24,conn:24,text:null,clock:22};
+async function loadSizes(){const r=await (await fetch('/api/sizes')).json();SIZES=r;
+  const files=new Set();const ix=r.index;
+  ['clock','text','digit'].forEach(k=>ix[k].forEach(e=>files.add(e.file)));
+  ix.os.forEach(s=>['apple','windows','linux'].forEach(n=>files.add(`os-${n}-${s}.png`)));
+  ix.conn.forEach(c=>['cable','bt','24g'].forEach(n=>files.add(`conn-${n}-${c.h}.png`)));
+  await Promise.all([...files].map(f=>new Promise(res=>{const im=new Image();im.onload=()=>{const c=document.createElement('canvas');c.width=im.width;c.height=im.height;
+    const g=c.getContext('2d');g.drawImage(im,0,0);LA[f]={w:im.width,h:im.height,d:g.getImageData(0,0,im.width,im.height).data};res()};im.onerror=res;im.src='/layout-asset/'+encodeURIComponent(f)})))}
+// A layout face or icon onto the preview, quantised to the panel's colours.
+function blitLA(img,f,ox,oy,sx,sw,h){const a=LA[f];if(!a)return;for(let y=0;y<h;y++)for(let x=0;x<sw;x++){const X=ox+x,Y=oy+y;if(X<0||Y<0||X>127||Y>127)continue;
+  const o=4*(y*a.w+sx+x),q=4*(Y*128+X);img.data[q]=a.d[o]&0xF8;img.data[q+1]=a.d[o+1]&0xFC;img.data[q+2]=a.d[o+2]&0xF8;img.data[q+3]=255}}
+function faceOf(kind,h){return SIZES&&SIZES.index[kind].find(e=>e.h===h||e.for===h)}
+function textF(img,fe,s,x,y,right){for(let i=0;i<s.length;i++){const c=s.charCodeAt(i);if(right!==undefined&&x+(i+1)*fe.cw>right)break;
+  if(c>=fe.first&&c<fe.first+fe.count)blitLA(img,fe.file,x+i*fe.cw,y,(c-fe.first)*fe.cw,fe.cw,fe.h)}}
+function size(k){const s=el(k).size;return s===undefined||s===null||s===DEFSIZE[k]?null:s}
+// What each sized element covers, as the firmware's display_layout_rect().
+function elSize(k){const s=size(k),e=el(k);
+  if(k==='os')return [s||24,s||24];
+  if(k==='conn'){if(!s)return [93,24];const c=SIZES.index.conn.find(c=>c.h===s),d=faceOf('digit',s);return [c.w+1+d.cw+1,s]}
+  if(k==='text')return [e.w||128,s?2*(s+1)+1:31];
+  if(k==='clock')return [e.w||128,s?s+1:23];
+  return [e.w||128,23]}
+// The element's height for a candidate size, and the size nearest a dragged height.
+function heightFor(k,s){return k==='text'?(s?2*(s+1)+1:31):k==='clock'?(s&&s!==22?s+1:23):s}
+function nearestSize(k,h){let best=null,bd=1e9;for(const s of SIZES.sizes[k]){const d=Math.abs(heightFor(k,s)-h);if(d<bd){bd=d;best=s}}return best}
 
 async function loadAssets(){
   const b=new Uint8Array(await (await fetch('/assets.bin')).arrayBuffer()), dv=new DataView(b.buffer), out={};
@@ -254,20 +293,25 @@ function text(img,id,s,x,y,right){const a=assets.idx[id];for(let i=0;i<s.length;
 function rect(img,x,y,w,h,c){for(let j=y;j<y+h;j++)for(let i=x;i<x+w;i++){if(i<0||j<0||i>127||j>127)continue;const q=4*(j*128+i);img.data[q]=c[0];img.data[q+1]=c[1];img.data[q+2]=c[2];img.data[q+3]=255}}
 function el(k){return layout.elements[k]}
 function hidden(k){return !!el(k).hidden}
-function bbox(item){ if(typeof item==='string'){const e=el(item),[w,h]=SIZE[item];return [e.x||0,e.y,BANDS.includes(item)?(e.w||128):w,h]}
+function bbox(item){ if(typeof item==='string'){const e=el(item),[w,h]=SIZES?elSize(item):SIZE[item];return [e.x||0,e.y,BANDS.includes(item)?(e.w||128):w,h]}
   const w=layout.widgets[item]; if(w.type==='label'){const f=FONT[w.font||'small'];return [w.x,w.y,f.adv*w.text.length,f.h]}
   return [w.x,w.y,w.w||16,w.h||16]}
 function draw(){
   const img=ctx.createImageData(128,128);for(let i=3;i<img.data.length;i+=4)img.data[i]=255;
   const E=layout.elements, W='#fff', white=[255,255,255];
-  if(!hidden('os'))asset(img,assets.idx[12]?12:11,E.os.x,E.os.y);
-  if(!hidden('conn'))asset(img,9,E.conn.x,E.conn.y);
+  if(!hidden('os')){const s=size('os');if(s)blitLA(img,`os-${assets.idx[12]?'linux':'windows'}-${s}.png`,E.os.x,E.os.y,0,s,s);else asset(img,assets.idx[12]?12:11,E.os.x,E.os.y)}
+  if(!hidden('conn')){const s=size('conn');if(s){const f=`conn-cable-${s}.png`;if(LA[f])blitLA(img,f,E.conn.x,E.conn.y,0,LA[f].w,s)}else asset(img,9,E.conn.x,E.conn.y)}
   // the song text: the play icon at x, the lines at x+14 and x+2, cut at the band's edge (display.c)
-  if(!hidden('text')){const t=E.text,r=t.x+t.w;for(let j=0;j<9;j++)for(let i=0;i<=Math.min(j,8-j);i++)rect(img,t.x+3+i,t.y+2+j,1,1,white);
-   text(img,1,'Song title here',t.x+14,t.y,r);text(img,1,'Artist name',t.x+2,t.y+15,r)}
+  if(!hidden('text')){const t=E.text,r=t.x+t.w,s=size('text'),fe=s&&faceOf('text',s),iy=s?Math.max(0,(s-12)>>1):0;
+   for(let j=0;j<9;j++)for(let i=0;i<=Math.min(j,8-j);i++)rect(img,t.x+3+i,t.y+iy+2+j,1,1,white);
+   if(fe){textF(img,fe,'Song title here',t.x+14,t.y,r);textF(img,fe,'Artist name',t.x+2,t.y+s+1,r)}
+   else{text(img,1,'Song title here',t.x+14,t.y,r);text(img,1,'Artist name',t.x+2,t.y+15,r)}}
   // the clock: its own face, or the 20px one, or the small one 4 rows down, by width
-  if(!hidden('clock')){const c=E.clock,s='12:34:56';let id=3,adv=15,y=c.y;if(8*15>c.w){if(8*10<=c.w){id=2;adv=10}else{id=1;adv=6;y=c.y+4}}
-   const w=s.length*adv;text(img,id,s,c.x+Math.max(0,(c.w-w)>>1),y,c.x+c.w)}
+  // ...at the layout's size: that face if 8 cells fit, else the 20px one where the band is 23 rows or more, else the small one (display.c)
+  if(!hidden('clock')){const c=E.clock,s='12:34:56',sz=size('clock'),fe=sz&&faceOf('clock',sz),H=sz?sz+1:23;
+   if(fe&&8*fe.cw<=c.w){textF(img,fe,s,c.x+((c.w-8*fe.cw)>>1),c.y,c.x+c.w)}
+   else{let id=3,adv=15,y=c.y;if(fe||8*15>c.w){if(8*10<=c.w&&H>=23){id=2;adv=10;y=c.y+((H-23)>>1)}else{id=1;adv=6;y=c.y+((H-15)>>1)}}
+    const w=s.length*adv;text(img,id,s,c.x+Math.max(0,(c.w-w)>>1),y,c.x+c.w)}}
   if(!hidden('lock')){const l=E.lock,cp=l.w<126,mini=l.w<86,px=l.x+(mini?1:cp?2:4),y=l.y+3;
     rect(img,px+4,y,5,1,[255,224,0]);rect(img,px+3,y+1,7,1,[255,224,0]);rect(img,px+2,y+2,2,6,[255,224,0]);rect(img,px+9,y+2,2,6,[255,224,0]);rect(img,px,y+7,13,9,[255,224,0]);
     if(mini)text(img,1,'C',l.x+17,l.y+4);else if(cp)text(img,1,'CAPS',l.x+18,l.y+4);else text(img,2,'CAPS',l.x+20,l.y)}
@@ -288,6 +332,7 @@ function overlay(){const o=ov.getContext('2d');o.clearRect(0,0,512,512);
     if(b){o.fillStyle='rgba(255,60,60,.18)';o.fillRect(x*Z,y*Z,w*Z,h*Z)}
     o.strokeStyle=b?'#ff4040':s?'#6a9cff':(typeof it==='string'?'rgba(255,200,80,.5)':'rgba(120,220,140,.6)');o.lineWidth=(s||b)?2:1;o.strokeRect(x*Z+1,y*Z+1,w*Z-2,h*Z-2);
     if(s&&typeof it==='string'&&BANDS.includes(it)){o.fillStyle='#6a9cff';o.fillRect((x+w)*Z-5,(y+h/2)*Z-8,4,16)}
+    if(s&&typeof it==='string'&&SIZED.includes(it)){o.fillStyle='#6a9cff';o.fillRect((x+w/2)*Z-8,(y+h)*Z-5,16,4)}
     if(s&&typeof it==='number'&&layout.widgets[it].type==='image'){o.fillStyle='#6a9cff';o.fillRect((x+w)*Z-9,(y+h)*Z-9,9,9)}}}
 function itemsList(){const ul=document.getElementById('items');ul.innerHTML='';
   const add=(it,label,extra)=>{const li=document.createElement('li');const sp=document.createElement('span');sp.textContent=label;li.append(sp);if(extra)li.append(extra);if(it===sel)li.className='sel';else if(typeof it==='string'&&hidden(it))li.className='hid';li.onclick=()=>{sel=it;refresh()};ul.append(li)};
@@ -301,8 +346,12 @@ function props(){const p=document.getElementById('props');p.innerHTML='';if(sel=
   if(typeof sel==='string'){const e=el(sel);p.innerHTML='<b>'+NAMES[sel]+'</b>';
     row.append(num('x',e,'x',127),num('y',e,'y',127));if(BANDS.includes(sel))row.append(num('width',e,'w',128));
     if(HIDEABLE.includes(sel)){const l=document.createElement('label');const c=document.createElement('input');c.type='checkbox';c.checked=!!e.hidden;c.onchange=()=>{e.hidden=c.checked;changed()};l.append(c,' hidden');row.append(l)}
+    if(SIZED.includes(sel)&&SIZES){const l=document.createElement('label');l.className='small';l.textContent='size ';const sz=document.createElement('select');
+      SIZES.sizes[sel].forEach(v=>{const o=new Option(v===null?'as the menu\'s Font':v+' px'+(v===DEFSIZE[sel]?' (today)':''),v===null?'':v);sz.add(o)});
+      sz.value=(e.size??DEFSIZE[sel])??'';sz.onchange=()=>{e.size=sz.value===''?null:parseInt(sz.value);changed()};l.append(sz);row.append(l)}
     if(sel==='text')p.insertAdjacentHTML('beforeend','<div class="small">Hiding it also hides the keyboard\'s messages (connection, alerts, brightness), which show here.</div>');
-    p.append(row);if(BANDS.includes(sel))p.insertAdjacentHTML('beforeend',`<div class="small">Drag the blue handle on its right edge to change the width (at least ${MINW[sel]} px). Narrower, it draws smaller: ${{text:'the song steps down to the small font, then its lines are cut',clock:'the clock steps down to a smaller font',lock:'compact labels below 126 px, single letters (C W F) below 86',status:'the battery text is shortened, then left out'}[sel]}.</div>`)}
+    p.append(row);if(SIZED.includes(sel))p.insertAdjacentHTML('beforeend',`<div class="small">Drag the blue handle on its bottom edge to make it bigger or smaller: it snaps to the sizes the keyboard has. A size other than today's is uploaded with the layout${sel==='text'?' (a bigger song font adds 20 to 50 seconds)':''}.</div>`);
+    if(BANDS.includes(sel))p.insertAdjacentHTML('beforeend',`<div class="small">Drag the blue handle on its right edge to change the width (at least ${MINW[sel]} px). Narrower, it draws smaller: ${{text:'the song steps down to the small font, then its lines are cut',clock:'the clock steps down to a smaller font',lock:'compact labels below 126 px, single letters (C W F) below 86',status:'the battery text is shortened, then left out'}[sel]}.</div>`)}
   else{const w=layout.widgets[sel];p.innerHTML='<b>'+(w.type==='label'?'Label':'Image')+'</b>';row.append(num('x',w,'x',127),num('y',w,'y',127));
     if(w.type==='image'){const base=images[w.src+'|'],ratio=base?base.w/base.h:1;
       const wi=num('width',w,'w',128),hi=num('height',w,'h',128),kc=document.createElement('label');kc.className='small';const k=document.createElement('input');k.type='checkbox';k.checked=keepRatio;k.onchange=()=>{keepRatio=k.checked};kc.append(k,' keep ratio');
@@ -343,14 +392,17 @@ cv.onmousedown=e=>{const r=cv.getBoundingClientRect(),x=(e.clientX-r.left)/Z|0,y
   const fx=(e.clientX-r.left)/Z;
   if(typeof sel==='string'&&BANDS.includes(sel)){const [bx,by,bw,bh]=bbox(sel);if(Math.abs(fx-(bx+bw))<1.5&&y>=by&&y<by+bh){drag={it:sel,resize:true};return}}
   const fy=(e.clientY-r.top)/Z;
+  if(typeof sel==='string'&&SIZED.includes(sel)&&SIZES){const [bx,by,bw,bh]=bbox(sel);if(Math.abs(fy-(by+bh))<1.5&&Math.abs(fx-(bx+bw/2))<3){drag={it:sel,vsize:true};return}}
   if(typeof sel==='number'&&layout.widgets[sel].type==='image'){const [bx,by,bw,bh]=bbox(sel);if(Math.abs(fx-(bx+bw))<2.5&&Math.abs(fy-(by+bh))<2.5){const b=images[layout.widgets[sel].src+'|'];drag={it:sel,corner:true,ratio:b?b.w/b.h:bw/bh};return}}
   for(const it of items){const [bx,by,bw,bh]=bbox(it);if(x>=bx&&x<bx+bw&&y>=by&&y<by+bh){sel=it;const o=typeof it==='string'?el(it):layout.widgets[it];drag={it,dx:x-(o.x||0),dy:y-o.y};refresh();return}}
   sel=null;refresh()};
 window.onmousemove=e=>{const r=cv.getBoundingClientRect(),x=Math.floor((e.clientX-r.left)/Z),y=Math.floor((e.clientY-r.top)/Z);
   if(x>=0&&y>=0&&x<128&&y<128)document.getElementById('cursor').textContent=`x ${x}, y ${y}`;
   if(typeof sel==='string'&&BANDS.includes(sel)&&!drag){const [bx,by,bw,bh]=bbox(sel),fx=(e.clientX-r.left)/Z;cv.style.cursor=(Math.abs(fx-(bx+bw))<1.5&&y>=by&&y<by+bh)?'ew-resize':'default'}
+  if(typeof sel==='string'&&SIZED.includes(sel)&&SIZES&&!drag){const [bx,by,bw,bh]=bbox(sel),fx=(e.clientX-r.left)/Z,fy=(e.clientY-r.top)/Z;if(Math.abs(fy-(by+bh))<1.5&&Math.abs(fx-(bx+bw/2))<3)cv.style.cursor='ns-resize'}
   if(typeof sel==='number'&&layout.widgets[sel]&&layout.widgets[sel].type==='image'&&!drag){const [bx,by,bw,bh]=bbox(sel),fx=(e.clientX-r.left)/Z,fy=(e.clientY-r.top)/Z;cv.style.cursor=(Math.abs(fx-(bx+bw))<2.5&&Math.abs(fy-(by+bh))<2.5)?'nwse-resize':'default'}
   if(!drag)return;const o=typeof drag.it==='string'?el(drag.it):layout.widgets[drag.it];
+  if(drag.vsize){const s=nearestSize(drag.it,Math.round((e.clientY-r.top)/Z)-o.y);if(s!==(o.size??DEFSIZE[drag.it])){o.size=s;changed()}return}
   if(drag.resize){o.w=Math.max(1,Math.min(128-o.x,Math.round((e.clientX-r.left)/Z)-o.x));changed();return}
   if(drag.corner){let nw=Math.max(1,Math.min(128-o.x,Math.round((e.clientX-r.left)/Z)-o.x)),nh=Math.max(1,Math.min(128-o.y,Math.round((e.clientY-r.top)/Z)-o.y));
     if(keepRatio&&!e.shiftKey){nh=Math.max(1,Math.round(nw/drag.ratio));if(o.y+nh>128){nh=128-o.y;nw=Math.max(1,Math.round(nh*drag.ratio))}}o.w=nw;o.h=nh;changed();return}
@@ -372,6 +424,6 @@ document.getElementById('save').onclick=async()=>{let n=document.getElementById(
   if(r.ok){log('saved '+r.name);files()}else status(false,r.error)};
 for(const [id,path,busy] of [['upload','/api/upload','Uploading… (the agent is paused meanwhile)'],['info','/api/info','Asking the keyboard…'],['reset','/api/reset','Erasing the layout slots…']])
   document.getElementById(id).onclick=async()=>{log(busy);const r=await api(path,{layout});log(r.ok?r.log:'');if(!r.ok)status(false,r.error);else check()};
-(async()=>{assets=await loadAssets();await files();await setLayout({})})();
+(async()=>{assets=await loadAssets();await loadSizes().catch(()=>{});await files();await setLayout({})})();
 </script></body></html>
 """
